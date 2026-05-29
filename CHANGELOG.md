@@ -1,56 +1,66 @@
 # 更新日志
 
-本文档记录本分叉维护版插件的重要变更。
+本文档记录分叉维护版 `astrbot_plugin_context_scene_memory` 的重要变更。
 
-上游项目：
+原仓库：
 
-- 仓库：[muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware)
+- 项目：`astrbot_plugin_context_aware`
 - 作者：木有知
+- 仓库：[muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware)
 
-说明：
+当前分叉仓库：
 
-- `v3.2.0` 起为当前分叉维护版的版本线。
-- `v3.1.2` 及以前的能力基础来自上游项目。
+- 项目：`astrbot_plugin_context_scene_memory`
+- 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
+
+## v3.2.1
+
+同步上游 `v3.1.6` 的更新，并保留分叉版改动。
+
+### 同步上游
+
+- 同步最近图片上下文能力，支持把图片单独注入到 `<recent_images>`。
+- 同步 `show_recent_images_allow_gif`，默认过滤 GIF，避免部分视觉模型不支持 `image/gif`。
+- 同步 Gemini_STT 语音转写上下文兼容，将语音转写记录为普通群聊消息。
+- 同步 `voice_context_window`，语音转写会进入独立 `<recent_voice_transcripts>` 窗口。
+- 同步按消息 ID 幂等写入，减少同一条消息被 handler 和 LLM 请求兜底重复记录。
+- 同步 `warn_builtin_ltm`，检测到 AstrBot 内置群聊上下文感知时输出警告。
+- 同步元数据中的 AstrBot 最低版本要求：`>=4.24.0`。
+
+### 保留分叉改动
+
+- 保留插件名 `astrbot_plugin_context_scene_memory` 与显示名“上下文场景记忆增强”。
+- 保留分叉专用运行时 extra key 和场景注入 marker，避免与上游版本冲突。
+- 保留临时场景注入，并在 extra parts 中检查 marker，避免提示词重复注入或写回历史。
+- 保留 `record_structural_messages`，纯 `@`、纯回复、`@全体` 仍可进入上下文分析。
+- 保留 `dynamic_name_identity_hint` 与 `dynamic_name_identity_template`，继续缓解动态群名片误判。
+- 保留图像转述按当前会话 provider 获取的行为。
+
+### 文档
+
+- 重写 `README.md`，去掉重复段落，补充上游同步范围、版本要求和新增配置说明。
+- 更新本变更记录，明确上游来源和分叉维护边界。
 
 ## v3.2.0
 
-分叉维护版首个版本。
+分叉维护版首个版本，基于上游 `v3.1.2`。
 
 ### 调整
 
-- 将插件名称调整为 `astrbot_plugin_context_scene_memory`
-- 将显示名调整为“上下文场景记忆增强”
-- 更新运行时注入标记与内部 extra key 标识，降低与上游版本并存时的冲突风险
+- 将插件名称调整为 `astrbot_plugin_context_scene_memory`。
+- 将显示名调整为“上下文场景记忆增强”。
+- 更新运行时注入标记与内部 extra key 标识，降低与上游版本并存时的冲突风险。
 
 ### 修复
 
-- 场景注入改为临时内容，不再写回 AstrBot 会话历史
-- 修复每轮场景描述可能导致伪上下文持续膨胀的问题
-- 修复纯 `@`、纯回复、`@全体` 结构消息可能漏记，导致 current 消息取错的问题
-- 图像转述改为按当前会话选择 provider，减少多模型或会话隔离场景的错配
+- 场景注入改为临时内容，不再写回 AstrBot 会话历史。
+- 修复每轮场景描述可能导致伪上下文持续膨胀的问题。
+- 修复纯 `@`、纯回复、`@全体` 结构消息可能漏记，导致 current 消息取错的问题。
+- 图像转述改为按当前会话选择 provider，减少多模型或会话隔离场景的错配。
 
 ### 新增
 
-- 新增 `record_structural_messages`
-  用于控制是否记录纯 `@`、纯回复、`@全体` 这类结构化消息
-- 新增 `dynamic_name_identity_hint`
-  用于控制是否启用动态群名片身份提示
-- 新增 `dynamic_name_identity_template`
-  用于自定义“被 @ 到的动态昵称就是你自己”的提示词模板
-- 新增中文 `README.md` 与 `CHANGELOG.md`
-  明确说明分叉来源、配置项和维护策略
-
-## 上游基线：v3.1.2
-
-以下为本分叉版继承自上游 `v3.1.2` 的主要能力基线：
-
-- 唤醒词显式匹配，降低误判
-- 多 `@` 对象时保留完整对话目标
-- 并发安全的会话管理
-- 图像转述并发限流与超时控制
-- 对话对象推断增强
-- 回复特征词可配置
-- 戳一戳触发支持
-- 可选历史压缩能力
-
-如需查看更早版本的细节，建议结合上游仓库提交历史一起参考。
+- 新增 `record_structural_messages`，用于控制是否记录纯 `@`、纯回复、`@全体` 这类结构化消息。
+- 新增 `dynamic_name_identity_hint`，用于控制是否启用动态群名片身份提示。
+- 新增 `dynamic_name_identity_template`，用于自定义“被 @ 到的动态昵称就是你自己”的提示词模板。
+- 新增中文 `README.md` 与 `CHANGELOG.md`，明确说明分叉来源、配置项和维护策略。

@@ -41,6 +41,43 @@
     "default": true,
     "hint": "开启后，纯@Bot、纯回复、纯@全体这类没有正文的消息也会进入上下文分析，减少说话对象误判"
   },
+  "warn_builtin_ltm": {
+    "description": "检测到内置群聊上下文感知时输出警告",
+    "type": "bool",
+    "default": true,
+    "hint": "建议关闭 AstrBot 内置群聊上下文感知，避免和本插件重复注入群聊历史"
+  },
+  "show_recent_images": {
+    "description": "在场景提示中单独列出最近图片消息",
+    "type": "bool",
+    "default": true,
+    "hint": "让未触发对话的图片也以 <recent_images> 形式显式进入后续 LLM 请求；启用图像转述后会显示图片描述"
+  },
+  "show_recent_images_allow_gif": {
+    "description": "允许将GIF图片消息加入最近图片上下文",
+    "type": "bool",
+    "default": false,
+    "hint": "仅当后续模型支持image/gif或你确认需要GIF上下文时开启；关闭时GIF不会进入<recent_images>，也不会触发图像转述",
+    "condition": {
+      "show_recent_images": true
+    }
+  },
+  "image_context_window": {
+    "description": "图片上下文扫描窗口",
+    "type": "int",
+    "default": 20,
+    "min": 1,
+    "max": 200,
+    "hint": "从最近 N 条消息中提取图片消息并单独注入，避免图片上下文被普通对话窗口截掉"
+  },
+  "voice_context_window": {
+    "description": "语音转写上下文扫描窗口",
+    "type": "int",
+    "default": 50,
+    "min": 0,
+    "max": 500,
+    "hint": "从最近 N 条消息中单独提取 Gemini_STT 的语音转写并注入；0 表示关闭"
+  },
   "debug_inference": {
     "description": "启用推断规则调试日志",
     "type": "bool",

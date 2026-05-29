@@ -14,10 +14,23 @@ help: |
   - 记录群聊最近消息，增强上下文连续性
   - 分析谁在和谁说话，减少 Bot 抢答
   - 识别 @、回复、唤醒词、主动触发、戳一戳等场景
-  - 可选图像转述与历史摘要压缩
+  - 同步上游图片上下文、GIF 过滤、语音转写上下文与内置 LTM 警告
+  - 可选图像转述、最近图片提示与历史摘要压缩
   - 可选动态群名片身份提示，缓解“@到动态昵称却被模型当成另一个AI”的误判
 
   更详细的来源说明、配置说明和变更记录请查看 README.md 与 CHANGELOG.md。
-version: 3.2.0
+version: 3.2.1
 author: Huli3（fork 自 木有知）
 repo: https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory
+astrbot_version: ">=4.24.0"
+support_platforms:
+  - aiocqhttp
+  - qq_official
+  - telegram
+  - discord
+  - slack
+  - kook
+  - lark
+  - satori
+  - misskey
+  - line

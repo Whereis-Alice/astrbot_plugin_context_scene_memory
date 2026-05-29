@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.2.0 (Context Scene Memory Enhancement)
+AstrBot 上下文场景记忆增强插件 v3.2.1 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -16,12 +16,24 @@ AstrBot 上下文场景记忆增强插件 v3.2.0 (Context Scene Memory Enhanceme
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
 
-v3.2.0 更新:
-- [FORK] 调整为分叉维护版插件标识，降低与上游版本并装或后续更新时的冲突风险
-- [FIX] 场景注入改为临时内容，不再写回会话历史，避免上下文膨胀
-- [FIX] 纯 @ / 纯回复 / @全体 结构化消息可配置记录，避免 current 消息取错
-- [FIX] 新增动态群名片身份提示，可配置告诉模型“被@到的动态昵称就是你自己”
-- [FIX] 图像转述按会话选择 provider，减少多模型/会话隔离场景的错配
+v3.2.1 分叉版更新:
+- [SYNC] 同步上游 v3.1.6：语音转写独立上下文窗口、图片上下文、GIF 过滤、内置 LTM 警告和消息去重
+- [KEEP] 保留分叉版插件标识、注入标记、动态群名片身份提示、结构化消息记录和临时场景注入
+
+v3.1.6 上游更新:
+- [FIX] 语音转写独立上下文窗口，避免高频群聊把未回复语音挤出最近对话流
+
+v3.1.5 更新:
+- [FIX] 兼容 Gemini_STT 语音转写上下文，记录为普通群聊消息
+- [FIX] 按消息 ID 幂等写入，避免 LLM 请求兜底记录和消息 handler 重复记录同一条语音
+
+v3.1.4 更新:
+- [FIX] 最近图片上下文支持过滤 GIF，避免不支持 image/gif 的模型在后续请求中报错
+- [CONFIG] 新增 show_recent_images_allow_gif 开关，默认不将 GIF 加入 <recent_images>
+
+v3.1.3 更新:
+- [FIX] 图片上下文记录只扩展到图片概要，避免纯表情/@/引用等占位消息污染对话流
+- [CHANGE] 最低 AstrBot 版本提高到 4.24.0，确保临时注入不会写入会话历史
 
 v3.1.2 更新:
 - [FIX] 唤醒词判定改为显式匹配 wake_prefix，避免把异常触发误判成 wake_word
@@ -50,7 +62,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.2.0
+Version: 3.2.1
 """
 
 from __future__ import annotations
@@ -89,9 +101,14 @@ class ExtraKeys:
     ACTIVE_TRIGGER: Final[str] = "_active_trigger"
     ACTIVE_REPLY_TRIGGERED: Final[str] = "active_reply_triggered"
     CURRENT_MESSAGE_RECORD: Final[str] = "_scene_memory_current_message_record"
+    GEMINI_STT_TRANSCRIPT: Final[str] = "_gemini_stt_transcript"
+    GEMINI_STT_RAW_TEXT: Final[str] = "_gemini_stt_raw_text"
+    GEMINI_STT_CACHE_ONLY: Final[str] = "_gemini_stt_cache_only"
+    GEMINI_STT_SHOULD_REPLY: Final[str] = "_gemini_stt_should_reply"
+    GEMINI_STT_REPLY_REASON: Final[str] = "_gemini_stt_reply_reason"
     
     # 场景注入标记，防止重复注入
-    SCENE_INJECTED_MARKER: Final[str] = "<!-- scene_memory_fork_v320 -->"
+    SCENE_INJECTED_MARKER: Final[str] = "<!-- scene_memory_fork_v321 -->"
 
 
 # ============================================================================
@@ -170,6 +187,11 @@ class MessageRecord:
     talking_to: str = "group"
     talking_to_name: str = "群聊"
     at_targets: list[tuple[str, str]] = field(default_factory=list)
+    message_outline: str = ""
+    has_image: bool = False
+    image_count: int = 0
+    has_gif: bool = False
+    gif_count: int = 0
 
 
 def _normalize_at_target(
@@ -179,9 +201,10 @@ def _normalize_at_target(
 ) -> tuple[str, str]:
     """统一 @ 目标的表示，Bot 使用稳定标识避免后续判断分裂。"""
     normalized_id = str(target_id or "").strip()
-    normalized_name = str(target_name or normalized_id).strip() or normalized_id
     if normalized_id == bot_id:
-        return "bot", normalized_name or "你"
+        return "bot", "你"
+
+    normalized_name = str(target_name or normalized_id).strip() or normalized_id
     return normalized_id, normalized_name
 
 
@@ -208,6 +231,103 @@ def _format_name_list(names: list[str]) -> str:
     if len(names) == 2:
         return f"{names[0]}和{names[1]}"
     return f"{'、'.join(names[:-1])}和{names[-1]}"
+
+
+def _clean_one_line(value: Any) -> str:
+    """压缩消息概要为单行文本，避免注入上下文时破坏结构。"""
+    text = "" if value is None else str(value)
+    return " ".join(text.replace("\r", " ").replace("\n", " ").split())
+
+
+def _event_message_outline(event: AstrMessageEvent) -> str:
+    """优先使用 AstrBot 消息概要，以保留图片/语音等非文本消息占位。"""
+    transcript = _event_voice_transcript(event)
+    if transcript:
+        return transcript
+
+    outline = ""
+    try:
+        outline = event.get_message_outline()
+    except Exception:
+        outline = ""
+    if not outline:
+        try:
+            outline = event.get_message_str()
+        except Exception:
+            outline = ""
+    if not outline:
+        outline = str(getattr(event.message_obj, "message_str", "") or event.message_str or "")
+    return _clean_one_line(outline)
+
+
+def _event_voice_transcript(event: AstrMessageEvent) -> str:
+    """读取 Gemini_STT 导出的语音转写，作为群聊上下文普通消息记录。"""
+    getter = getattr(event, "get_extra", None)
+    if not callable(getter):
+        return ""
+    try:
+        transcript = getter(ExtraKeys.GEMINI_STT_TRANSCRIPT, "") or getter(
+            ExtraKeys.GEMINI_STT_RAW_TEXT, ""
+        )
+    except Exception:
+        return ""
+    transcript = _clean_one_line(transcript)
+    if not transcript:
+        return ""
+    return f"[语音转写] {transcript}"
+
+
+def _looks_like_voice_transcript(text: str) -> bool:
+    return _clean_one_line(text).startswith("[语音转写]")
+
+
+def _looks_like_image_outline(text: str) -> bool:
+    """识别平台概要中的图片占位，兼容不同适配器的文案。"""
+    lowered = text.lower()
+    return any(token in lowered for token in ("[图片", "图片", "照片", "[image", "image", "photo"))
+
+
+_GIF_BASE64_PREFIXES: Final[tuple[str, str]] = ("R0lGODlh", "R0lGODdh")
+
+
+def _image_ref_looks_like_gif(image_ref: str) -> bool:
+    """尽量在投递给视觉模型前识别 GIF，避免不支持 image/gif 的模型报错。"""
+    ref = (image_ref or "").strip()
+    if not ref:
+        return False
+
+    lowered = ref.lower()
+    if "image/gif" in lowered:
+        return True
+
+    ref_without_query = lowered.split("?", 1)[0].split("#", 1)[0]
+    if ref_without_query.endswith(".gif"):
+        return True
+
+    local_path = ref
+    if lowered.startswith("file:///"):
+        local_path = ref[8:]
+    elif lowered.startswith("file://"):
+        local_path = ref[7:]
+    if "://" not in local_path and not lowered.startswith(("data:", "base64:")):
+        try:
+            with open(local_path, "rb") as f:
+                return f.read(6) in (b"GIF87a", b"GIF89a")
+        except OSError:
+            pass
+
+    payload = ref
+    lowered_payload = payload.lower()
+    if lowered_payload.startswith("base64://"):
+        payload = payload[len("base64://"):]
+    elif lowered_payload.startswith("base64:"):
+        payload = payload[len("base64:"):]
+
+    if payload.lower().startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+
+    payload = payload.lstrip()
+    return payload.startswith(_GIF_BASE64_PREFIXES)
 
 
 def _explicit_addressees(
@@ -347,6 +467,12 @@ class SessionManager:
         self._max_messages = max(10, max_messages)
         self._max_sessions = max(10, max_sessions)
 
+    def _has_message_id(self, state: SessionState, msg_id: str) -> bool:
+        normalized = str(msg_id or "").strip()
+        if not normalized:
+            return False
+        return any(existing.msg_id == normalized for existing in state.messages)
+
     def _get_lock(self, session_id: str) -> asyncio.Lock:
         """获取会话锁（惰性创建，使用 setdefault 保证原子性）"""
         # setdefault 是原子操作，避免竞态条件
@@ -392,13 +518,16 @@ class SessionManager:
         self._sessions[session_id] = state
         return state
 
-    async def add_message_async(self, session_id: str, msg: MessageRecord) -> None:
+    async def add_message_async(self, session_id: str, msg: MessageRecord) -> bool:
         """异步添加消息到会话（推荐使用，完全并发安全）"""
         async with self._get_lock(session_id):
             state = await self._get_or_create_session(session_id)
+            if self._has_message_id(state, msg.msg_id):
+                return False
             state.messages.append(msg)
             if not msg.is_bot:
                 state.last_user_interaction[msg.sender_id] = msg.timestamp
+            return True
 
     async def get_snapshot_async(self, session_id: str) -> SessionSnapshot:
         """获取会话快照（带会话锁）"""
@@ -459,15 +588,18 @@ class SessionManager:
                 return 0
             return len(state.messages)
 
-    def add_message(self, session_id: str, msg: MessageRecord) -> None:
+    def add_message(self, session_id: str, msg: MessageRecord) -> bool:
         """同步添加消息（向后兼容，但不推荐在并发场景使用）
         
         注意：此方法不提供完整的并发保护，仅用于向后兼容。
         """
         state = self.get(session_id)
+        if self._has_message_id(state, msg.msg_id):
+            return False
         state.messages.append(msg)
         if not msg.is_bot:
             state.last_user_interaction[msg.sender_id] = msg.timestamp
+        return True
 
     async def record_bot_response_async(
         self,
@@ -643,21 +775,42 @@ class SceneAnalyzer:
         """Bot ID 只读属性（v3.0.0: 修复封装破坏）"""
         return self._bot_id
 
+    @staticmethod
+    def _image_ref_from_component(comp: Image) -> str:
+        return comp.url if comp.url else (comp.file or "")
+
     def extract_message(self, event: AstrMessageEvent) -> MessageRecord:
         """从事件提取消息记录"""
         sender_id = event.get_sender_id()
+        message_outline = _event_message_outline(event)
+        voice_transcript = _event_voice_transcript(event)
+        image_count = 0
+        gif_count = 0
+        has_plain_text = False
 
         # 提取消息内容，拼接所有文本和图片描述
-        content = event.message_str or ""
+        content = voice_transcript or event.message_str or ""
         if not content:
             # message_str 为空时，从消息组件中拼接
             parts: list[str] = []
             for comp in event.get_messages():
                 if isinstance(comp, Plain) and comp.text:
+                    has_plain_text = True
                     parts.append(comp.text)
                 elif isinstance(comp, Image):
+                    image_count += 1
+                    if _image_ref_looks_like_gif(self._image_ref_from_component(comp)):
+                        gif_count += 1
                     parts.append("[图片]")
-            content = "".join(parts) if parts else "[消息]"
+            content = "".join(parts) if parts else (message_outline or "[消息]")
+        else:
+            has_plain_text = True
+            for comp in event.get_messages():
+                if isinstance(comp, Image):
+                    image_count += 1
+                    if _image_ref_looks_like_gif(self._image_ref_from_component(comp)):
+                        gif_count += 1
+        has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
 
         msg = MessageRecord(
             msg_id=str(event.message_obj.message_id),
@@ -666,6 +819,11 @@ class SceneAnalyzer:
             content=content[:500],
             timestamp=time.time(),
             is_bot=(sender_id == self._bot_id),
+            message_outline=message_outline,
+            has_image=has_image,
+            image_count=max(image_count, 1 if has_image else 0),
+            has_gif=gif_count > 0,
+            gif_count=gif_count,
         )
 
         for comp in event.get_messages():
@@ -933,6 +1091,10 @@ class SceneGenerator:
         *,
         identity_hint: str = "",
         show_flow: bool = True,
+        show_recent_images: bool = True,
+        show_recent_gifs: bool = True,
+        image_flow: list[MessageRecord] | None = None,
+        voice_flow: list[MessageRecord] | None = None,
     ) -> str:
         """生成场景描述，重点强调对话对象"""
         esc = self._escape
@@ -994,6 +1156,59 @@ class SceneGenerator:
             parts.append('  <recent_flow>')
             parts.extend(flow_lines)
             parts.append('  </recent_flow>')
+
+        if show_recent_images:
+            image_lines: list[str] = []
+            image_source = image_flow if image_flow is not None else flow
+            for m in image_source:
+                content = m.content or ""
+                if not m.has_image and "[图片" not in content:
+                    continue
+                visible_image_count = max(m.image_count - m.gif_count, 0)
+                if m.has_gif and not show_recent_gifs and visible_image_count <= 0:
+                    continue
+                to_name = _describe_addressee(
+                    m,
+                    bot_label="你",
+                    group_label="群",
+                    multi_target_bot_label="你",
+                )
+                sender = "[你]" if m.is_bot else m.sender_name
+                preview_source = content or m.message_outline or "[图片]"
+                preview = preview_source[:120] + ("..." if len(preview_source) > 120 else "")
+                display_count = visible_image_count if m.has_gif and not show_recent_gifs else m.image_count
+                count_attr = f' count="{display_count}"' if display_count > 1 else ""
+                image_lines.append(
+                    f'    <image sender="{esc(sender)}" talking_to="{esc(to_name)}"{count_attr}>'
+                    f"{esc(preview)}</image>"
+                )
+            if image_lines:
+                parts.append("  <recent_images>")
+                parts.extend(image_lines)
+                parts.append("  </recent_images>")
+
+        voice_source = voice_flow if voice_flow is not None else flow
+        voice_lines: list[str] = []
+        for m in voice_source:
+            content = m.content or ""
+            if not _looks_like_voice_transcript(content):
+                continue
+            to_name = _describe_addressee(
+                m,
+                bot_label="你",
+                group_label="群",
+                multi_target_bot_label="你",
+            )
+            sender = "[你]" if m.is_bot else m.sender_name
+            preview = content[:200] + ("..." if len(content) > 200 else "")
+            voice_lines.append(
+                f'    <voice sender="{esc(sender)}" talking_to="{esc(to_name)}">'
+                f"{esc(preview)}</voice>"
+            )
+        if voice_lines:
+            parts.append("  <recent_voice_transcripts>")
+            parts.extend(voice_lines[-5:])
+            parts.append("  </recent_voice_transcripts>")
 
         # ===== 5. Bot 状态 =====
         if bot_status.get("active"):
@@ -1142,6 +1357,12 @@ class Main(star.Star):
             )
             or ""
         )
+        self._warn_builtin_ltm = self._cfg_bool("warn_builtin_ltm", True)
+        self._show_recent_images = self._cfg_bool("show_recent_images", True)
+        self._show_recent_images_allow_gif = self._cfg_bool("show_recent_images_allow_gif", False)
+        self._image_context_window = max(1, self._cfg_int("image_context_window", 20))
+        self._voice_context_window = max(0, self._cfg_int("voice_context_window", 50))
+        self._builtin_ltm_warned: set[str] = set()
 
         # 图像转述配置
         self._image_caption_enabled = self._cfg_bool("image_caption", False)
@@ -1181,7 +1402,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.0"
+        version = "3.2.1"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1245,11 +1466,17 @@ class Main(star.Star):
         try:
             extra_parts = getattr(req, 'extra_user_content_parts', None)
             if extra_parts is not None and isinstance(extra_parts, list):
-                for part in extra_parts:
-                    if isinstance(part, TextPart) and marker in part.text:
+                for existing_part in extra_parts:
+                    if isinstance(existing_part, TextPart) and marker in getattr(existing_part, "text", ""):
                         logger.debug("[ContextAware] 场景已注入到 extra parts，跳过重复注入")
                         return
-                extra_parts.append(TextPart(text=scene_text).mark_as_temp())
+                part = TextPart(text=scene_text)
+                mark_as_temp = getattr(part, "mark_as_temp", None)
+                if callable(mark_as_temp):
+                    temp_part = mark_as_temp()
+                    if temp_part is not None:
+                        part = temp_part
+                extra_parts.append(part)
                 return
         except Exception:
             pass
@@ -1267,6 +1494,36 @@ class Main(star.Star):
         if self._group_only and event.is_private_chat():
             return False
         return True
+
+    def _builtin_ltm_enabled(self, event: AstrMessageEvent) -> bool:
+        """检测 AstrBot 内置群聊上下文感知是否启用，避免重复注入。"""
+        try:
+            cfg = self._context.get_config(umo=event.unified_msg_origin)
+        except TypeError:
+            cfg = self._context.get_config()
+        except Exception:
+            return False
+        if not cfg:
+            return False
+        try:
+            settings = cfg.get("provider_ltm_settings", {})
+            return bool(settings.get("group_icl_enable", False))
+        except Exception:
+            return False
+
+    def _warn_if_builtin_ltm_enabled(self, event: AstrMessageEvent) -> None:
+        if not self._warn_builtin_ltm:
+            return
+        umo = event.unified_msg_origin
+        if umo in self._builtin_ltm_warned:
+            return
+        if not self._builtin_ltm_enabled(event):
+            return
+        self._builtin_ltm_warned.add(umo)
+        logger.warning(
+            "[ContextAware] 检测到 AstrBot 内置群聊上下文感知已启用，"
+            "建议关闭 provider_ltm_settings.group_icl_enable，避免重复注入群聊历史。"
+        )
 
     def _ensure_initialized(self, event: AstrMessageEvent) -> bool:
         """确保组件已初始化"""
@@ -1504,15 +1761,31 @@ class Main(star.Star):
 
         sender_id = event.get_sender_id()
         parts: list[str] = []
+        message_outline = _event_message_outline(event)
+        voice_transcript = _event_voice_transcript(event)
+        image_count = 0
+        gif_count = 0
+        has_plain_text = False
+
+        if voice_transcript:
+            parts.append(voice_transcript)
+            has_plain_text = True
 
         # 提取消息内容
         for comp in event.get_messages():
-            if isinstance(comp, Plain) and comp.text:
+            if isinstance(comp, Plain) and comp.text and not voice_transcript:
+                has_plain_text = True
                 parts.append(comp.text)
             elif isinstance(comp, Image):
+                image_count += 1
+                image_url = SceneAnalyzer._image_ref_from_component(comp)
+                is_gif = _image_ref_looks_like_gif(image_url)
+                if is_gif:
+                    gif_count += 1
                 # 尝试图像转述
-                if self._image_caption_enabled:
-                    image_url = comp.url if comp.url else comp.file
+                if self._image_caption_enabled and (
+                    not is_gif or self._show_recent_images_allow_gif
+                ):
                     if image_url:
                         caption = await self._get_image_caption(image_url, event.unified_msg_origin)
                         if caption:
@@ -1535,7 +1808,10 @@ class Main(star.Star):
                     reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
                     parts.append(f"[回复 {reply_name}]" if reply_name else "[回复]")
 
-        content = "".join(parts) if parts else (event.message_str or "[消息]")
+        has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
+        content = "".join(parts) if parts else (message_outline or "[消息]")
+        if has_image and image_count == 0 and "[图片" not in content:
+            content = f"[图片] {content}".strip()
 
         msg = MessageRecord(
             msg_id=str(event.message_obj.message_id),
@@ -1544,6 +1820,11 @@ class Main(star.Star):
             content=content[:500],
             timestamp=time.time(),
             is_bot=(sender_id == self._analyzer.bot_id),
+            message_outline=message_outline,
+            has_image=has_image,
+            image_count=max(image_count, 1 if has_image else 0),
+            has_gif=gif_count > 0,
+            gif_count=gif_count,
         )
 
         # 提取 @ 和回复信息
@@ -1573,13 +1854,13 @@ class Main(star.Star):
         if not self._should_process(event):
             return
 
-        has_content = any(
-            isinstance(c, (Plain, Image)) for c in event.get_messages()
-        )
+        message_outline = _event_message_outline(event)
+        messages = event.get_messages()
+        has_content = any(isinstance(c, (Plain, Image)) for c in messages)
+        has_content = has_content or _looks_like_image_outline(message_outline)
+        has_content = has_content or bool(_event_voice_transcript(event))
         if not has_content and self._record_structural_messages:
-            has_content = any(
-                isinstance(c, (At, AtAll, Reply)) for c in event.get_messages()
-            )
+            has_content = any(isinstance(c, (At, AtAll, Reply)) for c in messages)
         if not has_content:
             return
 
@@ -1618,8 +1899,9 @@ class Main(star.Star):
             )
 
         # v3.0.0: 使用异步方法确保并发安全
-        await self._sessions.add_message_async(event.unified_msg_origin, msg)
-        self._stats.messages_recorded += 1
+        added = await self._sessions.add_message_async(event.unified_msg_origin, msg)
+        if added:
+            self._stats.messages_recorded += 1
 
         # 每记录 50 条消息输出一次统计
         if self._stats.messages_recorded % 50 == 0:
@@ -1644,6 +1926,7 @@ class Main(star.Star):
             return
 
         assert self._analyzer is not None
+        self._warn_if_builtin_ltm_enabled(event)
 
         umo = event.unified_msg_origin
         if not self._sessions.has_session(umo):
@@ -1654,7 +1937,9 @@ class Main(star.Star):
                 event.set_extra(ExtraKeys.CURRENT_MESSAGE_RECORD, msg)
             except Exception:
                 pass
-            await self._sessions.add_message_async(umo, msg)
+            added = await self._sessions.add_message_async(umo, msg)
+            if added:
+                self._stats.messages_recorded += 1
 
         try:
             snapshot = await self._sessions.get_snapshot_async(umo)
@@ -1715,23 +2000,20 @@ class Main(star.Star):
                     except Exception:
                         pass
 
-                if not isinstance(current_from_extra, MessageRecord):
-                    history_before_current = flow_source[:-1] if flow_source else []
-                    self._analyzer.infer_addressee(
-                        current,
-                        history_before_current,
-                        bot_replied_to=snapshot.bot_last_replied_to,
-                        bot_replied_to_name=snapshot.bot_last_replied_to_name,
-                    )
-                    try:
-                        event.set_extra(ExtraKeys.CURRENT_MESSAGE_RECORD, current)
-                    except Exception:
-                        pass
-
             trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
 
             window = self._cfg_int("dialogue_window", 8)
             flow = flow_source[-window:] if window > 0 else flow_source
+            image_flow = (
+                flow_source[-self._image_context_window:]
+                if self._image_context_window > 0
+                else flow_source
+            )
+            voice_flow = (
+                flow_source[-self._voice_context_window:]
+                if self._voice_context_window > 0
+                else []
+            )
 
             now = time.time()
             bot_status: dict[str, float | str | bool] = {}
@@ -1756,6 +2038,10 @@ class Main(star.Star):
                 summary=snapshot.summary,
                 identity_hint=identity_hint,
                 show_flow=bool(self._cfg("enable_dialogue_flow", True)),
+                show_recent_images=self._show_recent_images,
+                show_recent_gifs=self._show_recent_images_allow_gif,
+                image_flow=image_flow,
+                voice_flow=voice_flow,
             )
 
             # 注入场景描述到请求（v3.0.0: 防止重复注入）
@@ -1886,6 +2172,11 @@ class Main(star.Star):
                     group_label="群聊",
                     multi_target_bot_label="你",
                 ),
+                "has_image": msg.has_image,
+                "image_count": msg.image_count,
+                "has_gif": msg.has_gif,
+                "gif_count": msg.gif_count,
+                "message_outline": msg.message_outline,
             }
             for msg in messages
         ]
