@@ -105,6 +105,55 @@
       "dynamic_name_identity_hint": true
     }
   },
+  "dynamic_card_plus_compat": {
+    "description": "适配 Dynamic Card Plus 动态群名片",
+    "type": "bool",
+    "default": true,
+    "hint": "自动读取 astrbot_plugin_dynamic_card_plus 的基础名字、当前群名片和近期名片，把它们作为 Bot 文本别名参与触发与说话对象判断。"
+  },
+  "dynamic_card_plus_identity_hint": {
+    "description": "为 Dynamic Card Plus 别名启用专用身份提示",
+    "type": "bool",
+    "default": true,
+    "hint": "当消息文本或回复对象昵称命中 Dynamic Card Plus 群名片别名时，额外告诉模型这些名字指的就是它自己。",
+    "condition": {
+      "dynamic_card_plus_compat": true,
+      "dynamic_name_identity_hint": true
+    }
+  },
+  "dynamic_card_plus_identity_template": {
+    "description": "Dynamic Card Plus 身份提示词模板",
+    "type": "text",
+    "default": "消息里出现的“{bot_called_names}”来自 DynamicCardPlus 当前或近期群名片，指的就是你本人，不是另一个人或另一个 AI。",
+    "hint": "可用占位符: {bot_called_names}",
+    "condition": {
+      "dynamic_card_plus_compat": true,
+      "dynamic_card_plus_identity_hint": true,
+      "dynamic_name_identity_hint": true
+    }
+  },
+  "dynamic_card_plus_alias_max_count": {
+    "description": "Dynamic Card Plus 动态别名最大数量",
+    "type": "int",
+    "default": 6,
+    "min": 1,
+    "max": 20,
+    "hint": "每次请求最多读取多少个动态名片别名。通常保持默认即可。过大可能增加误触发。dynamic_card_plus_compat 关闭时无效。",
+    "condition": {
+      "dynamic_card_plus_compat": true
+    }
+  },
+  "dynamic_card_plus_alias_min_length": {
+    "description": "Dynamic Card Plus 动态别名最小长度",
+    "type": "int",
+    "default": 2,
+    "min": 1,
+    "max": 20,
+    "hint": "用于过滤过短别名，降低把单字或符号误判成 Bot 名字的概率。dynamic_card_plus_compat 关闭时无效。",
+    "condition": {
+      "dynamic_card_plus_compat": true
+    }
+  },
   "image_caption": {
     "description": "启用图像转述（将群友发的图片转为文字描述）",
     "type": "bool",

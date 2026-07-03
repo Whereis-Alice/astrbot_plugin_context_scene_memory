@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版 `v3.2.1` 已同步上游 `v3.1.6` 的主要更新，同时保留本分叉的插件标识、动态群名片提示、结构化消息记录和临时场景注入修复。
+当前分叉版 `v3.2.2` 已同步上游 `v3.1.6` 的主要更新，同时保留本分叉的插件标识、动态群名片提示、结构化消息记录、临时场景注入修复，并新增对 `astrbot_plugin_dynamic_card_plus` 的适配。
 
 ## 这个插件做什么
 
@@ -44,6 +44,7 @@ provider_settings:
 | `only_group_chat` | `true` | 群聊使用，私聊不做复杂场景分析 |
 | `record_structural_messages` | `true` | 记录纯 `@`、纯回复、`@全体`，减少 current 消息错位 |
 | `dynamic_name_identity_hint` | `true` | 动态名片/状态昵称场景建议开启 |
+| `dynamic_card_plus_compat` | `true` | 自动识别 Dynamic Card Plus 当前群名片，减少把 Bot 当成另一个人的误判 |
 | `warn_builtin_ltm` | `true` | 检测到内置群聊上下文时输出警告 |
 | `show_recent_images` | `true` | 单独注入最近图片上下文 |
 | `show_recent_images_allow_gif` | `false` | 默认过滤 GIF，避免部分模型不支持 `image/gif` |
@@ -54,6 +55,8 @@ provider_settings:
 
 ```text
 dynamic_name_identity_hint = true
+dynamic_card_plus_compat = true
+dynamic_card_plus_identity_hint = true
 dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”就是你当前的群名片/动态昵称，指的就是你，不是另一个AI。
 ```
 
@@ -70,6 +73,20 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `enable_dialogue_flow` | 是否显示最近对话流 |
 | `debug_inference` | 输出说话对象推断日志 |
 | `reply_starters` | 自定义“像是在回复 Bot”的前缀词 |
+
+### 动态群名片
+
+| 配置项 | 说明 |
+| --- | --- |
+| `dynamic_name_identity_hint` | 是否注入“被点名的动态昵称就是你自己”的身份提示 |
+| `dynamic_name_identity_template` | 通用动态名片身份提示词模板，可用 `{bot_called_names}` |
+| `dynamic_card_plus_compat` | 是否读取 `astrbot_plugin_dynamic_card_plus` 的基础名字、当前群名片和近期名片 |
+| `dynamic_card_plus_identity_hint` | 命中 Dynamic Card Plus 别名时是否使用专用身份提示 |
+| `dynamic_card_plus_identity_template` | Dynamic Card Plus 专用身份提示词模板，可用 `{bot_called_names}` |
+| `dynamic_card_plus_alias_max_count` | 每次请求最多使用多少个动态名片别名，默认 `6` |
+| `dynamic_card_plus_alias_min_length` | 动态别名最小长度，默认 `2`，用于降低单字误触发 |
+
+适配逻辑是软集成：如果没有安装或启用 `astrbot_plugin_dynamic_card_plus`，本插件会自动退回原有行为。开启后会把基础名、当前群 `last_card`、可构建出的当前名片和手动完整名片提炼成 Bot 别名；当用户文本点名这些别名，或回复对象昵称命中这些别名时，会优先判定为在和 Bot 说话。
 
 ### 图片与语音
 
@@ -103,6 +120,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 场景注入使用临时 `TextPart`，并在 extra parts 中检查 marker，避免重复注入和历史污染。
 - 新增 `record_structural_messages`，让纯 `@`、纯回复、`@全体` 也能被记录。
 - 新增 `dynamic_name_identity_hint` 与 `dynamic_name_identity_template`，缓解动态名片被模型当成另一个 AI 的问题。
+- 新增 `dynamic_card_plus_compat` 等配置，适配 `astrbot_plugin_dynamic_card_plus` 的动态群名片别名。
 - 图像转述默认按当前会话选择 provider，适配多模型和多会话场景。
 
 ## 已同步的上游能力

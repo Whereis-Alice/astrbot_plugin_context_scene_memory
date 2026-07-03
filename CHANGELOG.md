@@ -13,6 +13,28 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.2.2
+
+适配 `astrbot_plugin_dynamic_card_plus`，减少动态群名片导致的“Bot 被当成另一个人或另一个 AI”的误判。
+
+### 新增
+
+- 新增 `dynamic_card_plus_compat`，默认开启，自动读取 Dynamic Card Plus 的基础名字、当前群名片和近期名片作为 Bot 文本别名。
+- 新增 `dynamic_card_plus_identity_hint` 与 `dynamic_card_plus_identity_template`，命中动态名片别名时使用专用身份提示词。
+- 新增 `dynamic_card_plus_alias_max_count` 与 `dynamic_card_plus_alias_min_length`，用于控制动态别名数量和最小长度，降低误触发概率。
+
+### 改进
+
+- 文本消息命中 Bot 动态名片别名时，会被推断为用户正在和 Bot 说话，而不是仅仅“提到 Bot”。
+- 回复对象昵称命中 Dynamic Card Plus 名片别名时，即使 Reply 组件没有稳定提供 Bot ID，也会按“回复 Bot”处理。
+- Bot 刚回复过当前用户时，短句追问如“你说啥”“啥”“没听懂”等更容易被识别为在继续和 Bot 对话。
+- `<conversation_scene>` 在文本点名动态名片时会明确提示“这是你本人，不是另一个人或另一个 AI”。
+
+### 兼容性
+
+- 这是软集成：未安装、未启用或无法读取 `astrbot_plugin_dynamic_card_plus` 时，会自动退回原行为。
+- 不需要修改 `astrbot_plugin_dynamic_card_plus` 本体。
+
 ## v3.2.1
 
 同步上游 `v3.1.6` 的更新，并保留分叉版改动。

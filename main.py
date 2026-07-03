@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.2.1 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.2.2 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,11 @@ AstrBot 上下文场景记忆增强插件 v3.2.1 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.2.2 分叉版更新:
+- [NEW] 适配 astrbot_plugin_dynamic_card_plus，自动读取基础名字、当前群名片和近期名片作为 Bot 文本别名
+- [FIX] 回复对象昵称命中动态名片时，按“回复 Bot”处理，减少把动态名片误判成另一个人的情况
+- [CONFIG] 新增 dynamic_card_plus_compat、dynamic_card_plus_identity_hint、dynamic_card_plus_identity_template 等配置项
 
 v3.2.1 分叉版更新:
 - [SYNC] 同步上游 v3.1.6：语音转写独立上下文窗口、图片上下文、GIF 过滤、内置 LTM 警告和消息去重
@@ -62,7 +67,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.2.1
+Version: 3.2.2
 """
 
 from __future__ import annotations
@@ -126,6 +131,8 @@ TRIGGER_ACTIVE: Final = "active"
 TRIGGER_POKE: Final = "poke"
 TRIGGER_UNKNOWN: Final = "unknown"
 
+DYNAMIC_CARD_PLUS_PLUGIN_ID: Final[str] = "astrbot_plugin_dynamic_card_plus"
+
 # 触发类型中文名（用于日志）
 TRIGGER_NAMES: Final = {
     TRIGGER_PRIVATE: "私聊",
@@ -157,6 +164,7 @@ class InferenceReason:
     """对话对象推断原因常量"""
     
     RULE_1_AT_BOT: Final[str] = "rule_1_at_bot"           # 明确 @Bot
+    RULE_1B_TEXT_MENTION_BOT: Final[str] = "rule_1b_text_mention_bot"  # 文本点名 Bot
     RULE_2_AT_OTHER: Final[str] = "rule_2_at_other"       # @其他人
     RULE_3_REPLY: Final[str] = "rule_3_reply"             # 引用回复
     RULE_4_BOT_REPLIED: Final[str] = "rule_4_bot_replied" # Bot 刚回复过此人
@@ -184,6 +192,7 @@ class MessageRecord:
     at_bot: bool = False
     at_all: bool = False
     reply_to_id: str | None = None
+    reply_to_name: str = ""
     talking_to: str = "group"
     talking_to_name: str = "群聊"
     at_targets: list[tuple[str, str]] = field(default_factory=list)
@@ -237,6 +246,76 @@ def _clean_one_line(value: Any) -> str:
     """压缩消息概要为单行文本，避免注入上下文时破坏结构。"""
     text = "" if value is None else str(value)
     return " ".join(text.replace("\r", " ").replace("\n", " ").split())
+
+
+def _append_unique_text(items: list[str], value: Any, *, key_seen: set[str] | None = None) -> None:
+    text = _clean_one_line(value).strip()
+    if not text:
+        return
+    key = text.casefold()
+    seen = key_seen if key_seen is not None else {item.casefold() for item in items}
+    if key in seen:
+        return
+    items.append(text)
+    seen.add(key)
+
+
+def _is_useful_dynamic_card_alias(value: str, *, min_length: int = 2) -> bool:
+    text = _clean_one_line(value).strip(" \t\r\n-_/|｜·•,，:：[]【】()（）")
+    if len(text) < min_length or len(text) > 80:
+        return False
+    if not re.search(r"[\w\u4e00-\u9fff]", text, re.UNICODE):
+        return False
+    return text.casefold() not in {
+        "cpu",
+        "mem",
+        "memory",
+        "ram",
+        "time",
+        "status",
+        "sen",
+        "sen值",
+        "内存",
+        "时间",
+        "状态",
+    }
+
+
+def _dynamic_card_alias_candidates(value: Any, *, min_length: int = 2) -> list[str]:
+    """Extract stable bot aliases from a dynamic group card."""
+    text = _clean_one_line(value).strip()
+    if not text:
+        return []
+
+    aliases: list[str] = []
+    seen: set[str] = set()
+
+    def add(alias: Any) -> None:
+        alias_text = _clean_one_line(alias).strip(" \t\r\n-_/|｜·•,，:：[]【】()（）")
+        if _is_useful_dynamic_card_alias(alias_text, min_length=min_length):
+            _append_unique_text(aliases, alias_text, key_seen=seen)
+
+    add(text)
+
+    metric_pattern = re.compile(
+        r"(?i)(cpu|mem|memory|ram|sen\s*值|sen值|内存|时间|状态|负载)\s*[:：]?\s*[\d.％%:：-]*"
+    )
+    metric_match = metric_pattern.search(text)
+    if metric_match and metric_match.start() > 0:
+        add(text[: metric_match.start()])
+
+    stripped = metric_pattern.sub(" ", text)
+    stripped = re.sub(r"\b\d{1,2}:\d{2}(?::\d{2})?\b", " ", stripped)
+    stripped = re.sub(r"\b\d{4}[-/]\d{1,2}[-/]\d{1,2}\b", " ", stripped)
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    if stripped != text:
+        add(stripped)
+
+    first_token = re.split(r"[\s|｜/·•]+", text, maxsplit=1)[0]
+    if first_token != text:
+        add(first_token)
+
+    return aliases
 
 
 def _event_message_outline(event: AstrMessageEvent) -> str:
@@ -751,18 +830,8 @@ class SceneAnalyzer:
         wake_prefixes: list[str] | None = None,
     ) -> None:
         self._bot_id = bot_id
-        names = [n.lower() for n in (bot_names or []) if n]
-        self._bot_names: tuple[str, ...] = tuple(names)
-        # 为英文/数字类名字做边界匹配，降低误触发（如 “robot” 包含 “bot”）
-        compiled: list[tuple[str, re.Pattern[str] | None]] = []
-        for n in names:
-            if re.fullmatch(r"[a-z0-9_]+", n):
-                compiled.append(
-                    (n, re.compile(rf"(?<![\\w]){re.escape(n)}(?![\\w])", re.IGNORECASE))
-                )
-            else:
-                compiled.append((n, None))
-        self._bot_name_patterns: tuple[tuple[str, re.Pattern[str] | None], ...] = tuple(compiled)
+        self._bot_name_patterns = self._compile_bot_name_patterns(bot_names or [])
+        self._bot_names = tuple(key for _, key, _ in self._bot_name_patterns)
         self._reply_starters = reply_starters or DEFAULT_REPLY_STARTERS
         self._wake_prefixes: tuple[str, ...] = tuple(
             str(prefix).strip()
@@ -774,6 +843,68 @@ class SceneAnalyzer:
     def bot_id(self) -> str:
         """Bot ID 只读属性（v3.0.0: 修复封装破坏）"""
         return self._bot_id
+
+    @staticmethod
+    def _compile_bot_name_patterns(
+        bot_names: list[str] | tuple[str, ...],
+    ) -> tuple[tuple[str, str, re.Pattern[str] | None], ...]:
+        compiled: list[tuple[str, str, re.Pattern[str] | None]] = []
+        seen: set[str] = set()
+        for raw_name in bot_names:
+            display_name = _clean_one_line(raw_name).strip()
+            if not display_name:
+                continue
+            key = display_name.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            # 为英文/数字类名字做边界匹配，降低误触发（如 “robot” 包含 “bot”）
+            pattern = (
+                re.compile(rf"(?<![\w]){re.escape(key)}(?![\w])", re.IGNORECASE)
+                if re.fullmatch(r"[a-z0-9_]+", key)
+                else None
+            )
+            compiled.append((display_name, key, pattern))
+        return tuple(compiled)
+
+    def _iter_bot_name_patterns(
+        self,
+        extra_bot_names: list[str] | tuple[str, ...] | None = None,
+    ) -> tuple[tuple[str, str, re.Pattern[str] | None], ...]:
+        if not extra_bot_names:
+            return self._bot_name_patterns
+        return self._bot_name_patterns + self._compile_bot_name_patterns(tuple(extra_bot_names))
+
+    def matched_bot_names(
+        self,
+        content: str,
+        extra_bot_names: list[str] | tuple[str, ...] | None = None,
+        *,
+        limit: int = 3,
+    ) -> list[str]:
+        content_text = str(content or "")
+        if not content_text:
+            return []
+        content_lower = content_text.casefold()
+        matches: list[str] = []
+        seen: set[str] = set()
+        for display_name, key, pattern in self._iter_bot_name_patterns(extra_bot_names):
+            matched = bool(pattern.search(content_lower)) if pattern else bool(key and key in content_lower)
+            if not matched or key in seen:
+                continue
+            seen.add(key)
+            matches.append(display_name)
+            if len(matches) >= limit:
+                break
+        return matches
+
+    def matched_bot_name(
+        self,
+        content: str,
+        extra_bot_names: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
+        matches = self.matched_bot_names(content, extra_bot_names, limit=1)
+        return matches[0] if matches else ""
 
     @staticmethod
     def _image_ref_from_component(comp: Image) -> str:
@@ -839,6 +970,9 @@ class SceneAnalyzer:
             elif isinstance(comp, Reply):
                 if comp.sender_id:
                     msg.reply_to_id = str(comp.sender_id)
+                reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
+                if reply_name:
+                    msg.reply_to_name = reply_name
 
         return msg
 
@@ -868,7 +1002,10 @@ class SceneAnalyzer:
         return False
 
     def detect_trigger(
-        self, event: AstrMessageEvent, msg: MessageRecord
+        self,
+        event: AstrMessageEvent,
+        msg: MessageRecord,
+        extra_bot_names: list[str] | tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         """检测触发类型"""
         sender = msg.sender_name
@@ -887,7 +1024,7 @@ class SceneAnalyzer:
         if msg.at_all:
             return TRIGGER_AT_ALL, f"{sender} @了全体成员（包含你），可能希望你回应"
 
-        if msg.reply_to_id == self._bot_id:
+        if msg.reply_to_id == self._bot_id or self.matched_bot_name(msg.reply_to_name, extra_bot_names):
             return TRIGGER_REPLY, f"{sender} 回复了你之前的消息"
 
         if self._is_explicit_wake_trigger(event):
@@ -899,15 +1036,9 @@ class SceneAnalyzer:
                 )
             return TRIGGER_WAKE, f"{sender} 使用唤醒词呼叫你"
 
-        if self._bot_names:
-            msg_lower = msg.content.lower()
-            for name, pat in self._bot_name_patterns:
-                if pat:
-                    if pat.search(msg_lower):
-                        return TRIGGER_MENTION, f"{sender} 在消息中提到了你"
-                else:
-                    if name and name in msg_lower:
-                        return TRIGGER_MENTION, f"{sender} 在消息中提到了你"
+        matched_name = self.matched_bot_name(msg.content, extra_bot_names)
+        if matched_name:
+            return TRIGGER_MENTION, f"{sender} 在消息中用“{matched_name}”提到了你"
 
         if event.get_extra(ExtraKeys.ACTIVE_TRIGGER) or event.get_extra(ExtraKeys.ACTIVE_REPLY_TRIGGERED):
             return TRIGGER_ACTIVE, "你是主动加入这个对话的，没有人在叫你"
@@ -934,6 +1065,7 @@ class SceneAnalyzer:
         history: list[MessageRecord] | deque[MessageRecord],
         bot_replied_to: str = "",
         bot_replied_to_name: str = "",
+        extra_bot_names: list[str] | tuple[str, ...] | None = None,
     ) -> str:
         """
         推断消息的对话对象
@@ -971,11 +1103,15 @@ class SceneAnalyzer:
             return InferenceReason.RULE_2_AT_OTHER
 
         # ===== 规则3: 引用回复消息（高置信度）=====
-        if msg.reply_to_id:
-            if msg.reply_to_id == self._bot_id:
+        reply_target_is_bot = (
+            msg.reply_to_id == self._bot_id
+            or bool(self.matched_bot_name(msg.reply_to_name, extra_bot_names))
+        )
+        if msg.reply_to_id or msg.reply_to_name:
+            if reply_target_is_bot:
                 msg.talking_to, msg.talking_to_name = "bot", "你"
             else:
-                msg.talking_to = msg.reply_to_id
+                msg.talking_to = msg.reply_to_id or msg.reply_to_name or "reply_target"
                 # 将 deque 转为可迭代的反向列表
                 history_list = list(history) if isinstance(history, deque) else history
                 for m in reversed(history_list):
@@ -983,8 +1119,15 @@ class SceneAnalyzer:
                         msg.talking_to_name = m.sender_name
                         break
                 else:
-                    msg.talking_to_name = msg.reply_to_id
+                    msg.talking_to_name = msg.reply_to_name or msg.reply_to_id or "被回复者"
             return InferenceReason.RULE_3_REPLY
+
+        # ===== 规则1B: 文本点名 Bot（动态群名片/昵称场景）=====
+        matched_text_name = self.matched_bot_name(msg.content, extra_bot_names)
+        if matched_text_name:
+            msg.talking_to = "bot"
+            msg.talking_to_name = matched_text_name
+            return InferenceReason.RULE_1B_TEXT_MENTION_BOT
 
         # ===== 以下是上下文推断，需要更保守 =====
         if not history:
@@ -1007,7 +1150,10 @@ class SceneAnalyzer:
             if bot_replied_to == msg.sender_id:
                 stripped = msg.content.strip()
                 # 保守：只对“短确认/致谢类”做推断，避免把用户对他人的“好的/嗯”等当成回复 Bot
-                if stripped and len(stripped) <= 20 and self._looks_like_reply(stripped):
+                if stripped and len(stripped) <= 30 and (
+                    self._looks_like_reply(stripped)
+                    or self._looks_like_direct_bot_followup(stripped)
+                ):
                     # 若 Bot 插话前，群里有人刚刚在和该用户说话，则优先认为用户在回那个人
                     history_list = list(history) if isinstance(history, deque) else history
                     prev_to_user: MessageRecord | None = None
@@ -1055,6 +1201,29 @@ class SceneAnalyzer:
         """判断是否像回复（v3.0.0: 使用可配置的回复特征词）"""
         stripped = content.strip()
         return any(stripped.startswith(s) for s in self._reply_starters)
+
+    @staticmethod
+    def _looks_like_direct_bot_followup(content: str) -> bool:
+        """判断短句是否像紧接着在追问/回应 Bot。"""
+        stripped = content.strip()
+        if not stripped or len(stripped) > 30:
+            return False
+        normalized = re.sub(r"\s+", "", stripped).casefold()
+        if any(token in normalized for token in ("你", "妳", "bot", "机器人")):
+            return True
+        return any(
+            token in normalized
+            for token in (
+                "啥",
+                "什么",
+                "没懂",
+                "没听懂",
+                "再说",
+                "继续",
+                "?",
+                "？",
+            )
+        )
 
 
 # ============================================================================
@@ -1267,6 +1436,8 @@ class SceneGenerator:
             )
 
         if trigger == TRIGGER_MENTION:
+            if is_talking_to_bot:
+                return f"{bot_alias_note}用户正在用你的名字或当前群名片称呼你，指向的是你本人，请正常回应。"
             return "用户提到了你，可以适当回应。"
 
         # ===== 主动触发 - 需要特别小心 =====
@@ -1357,6 +1528,23 @@ class Main(star.Star):
             )
             or ""
         )
+        self._dynamic_card_plus_compat_enabled = self._cfg_bool("dynamic_card_plus_compat", True)
+        self._dynamic_card_plus_identity_hint_enabled = self._cfg_bool(
+            "dynamic_card_plus_identity_hint", True
+        )
+        self._dynamic_card_plus_identity_template = str(
+            self._cfg(
+                "dynamic_card_plus_identity_template",
+                "消息里出现的“{bot_called_names}”来自 DynamicCardPlus 当前或近期群名片，指的就是你本人，不是另一个人或另一个 AI。",
+            )
+            or ""
+        )
+        self._dynamic_card_plus_alias_max_count = max(
+            1, min(20, self._cfg_int("dynamic_card_plus_alias_max_count", 6))
+        )
+        self._dynamic_card_plus_alias_min_length = max(
+            1, min(20, self._cfg_int("dynamic_card_plus_alias_min_length", 2))
+        )
         self._warn_builtin_ltm = self._cfg_bool("warn_builtin_ltm", True)
         self._show_recent_images = self._cfg_bool("show_recent_images", True)
         self._show_recent_images_allow_gif = self._cfg_bool("show_recent_images_allow_gif", False)
@@ -1396,13 +1584,15 @@ class Main(star.Star):
 
         self._bot_id: str | None = None
         self._analyzer: SceneAnalyzer | None = None
+        self._base_bot_names: list[str] = []
+        self._last_dynamic_card_plus_error_log_at = 0.0
 
         # 图像转述统计
         self._image_caption_count = 0
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.1"
+        version = "3.2.2"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1436,16 +1626,157 @@ class Main(star.Star):
             return [str(v) for v in val if v]
         return default or []
 
-    def _build_identity_hint(self, msg: MessageRecord) -> str:
+    def _dynamic_card_plus_plugin(self) -> Any | None:
+        if not self._dynamic_card_plus_compat_enabled:
+            return None
+        getter = getattr(self._context, "get_registered_star", None)
+        if not callable(getter):
+            return None
+        try:
+            meta = getter(DYNAMIC_CARD_PLUS_PLUGIN_ID)
+        except Exception:
+            return None
+        if not meta or getattr(meta, "activated", True) is False:
+            return None
+        return getattr(meta, "star_cls", None) or getattr(meta, "star", None)
+
+    def _dynamic_card_plus_state(self, plugin: Any, event: AstrMessageEvent) -> Any | None:
+        states = getattr(plugin, "_states", None)
+        if not states:
+            return None
+
+        keys: list[str] = []
+
+        extractor = getattr(plugin, "_extract_group_context", None)
+        if callable(extractor):
+            try:
+                group_context = extractor(event)
+                if group_context and len(group_context) >= 2:
+                    _append_unique_text(keys, group_context[1])
+            except Exception:
+                pass
+
+        message_obj = getattr(event, "message_obj", None)
+        for value in (
+            getattr(message_obj, "group_id", ""),
+            getattr(event, "group_id", ""),
+        ):
+            _append_unique_text(keys, value)
+
+        get_group_id = getattr(event, "get_group_id", None)
+        if callable(get_group_id):
+            try:
+                _append_unique_text(keys, get_group_id())
+            except Exception:
+                pass
+
+        getter = getattr(states, "get", None)
+        if callable(getter):
+            for key in keys:
+                state = getter(str(key))
+                if state is not None:
+                    return state
+
+        unified_msg_origin = _clean_one_line(getattr(event, "unified_msg_origin", ""))
+        if unified_msg_origin:
+            try:
+                for state in states.values():
+                    if _clean_one_line(getattr(state, "unified_msg_origin", "")) == unified_msg_origin:
+                        return state
+            except Exception:
+                return None
+
+        return None
+
+    def _dynamic_card_plus_aliases(self, event: AstrMessageEvent) -> tuple[str, ...]:
+        plugin = self._dynamic_card_plus_plugin()
+        if plugin is None:
+            return ()
+
+        aliases: list[str] = []
+        seen: set[str] = set()
+
+        def add_candidates(value: Any) -> None:
+            for alias in _dynamic_card_alias_candidates(
+                value,
+                min_length=self._dynamic_card_plus_alias_min_length,
+            ):
+                _append_unique_text(aliases, alias, key_seen=seen)
+                if len(aliases) >= self._dynamic_card_plus_alias_max_count:
+                    return
+
+        try:
+            settings = None
+            settings_getter = getattr(plugin, "_settings", None)
+            if callable(settings_getter):
+                settings = settings_getter()
+                if getattr(settings, "enabled", True) is False:
+                    return ()
+                add_candidates(getattr(settings, "bot_name", ""))
+
+            state = self._dynamic_card_plus_state(plugin, event)
+            if state is not None:
+                add_candidates(getattr(state, "last_card", ""))
+                add_candidates(getattr(state, "manual_full_card", ""))
+                builder = getattr(plugin, "_build_card", None)
+                if callable(builder) and settings is not None:
+                    add_candidates(builder(state, settings))
+        except Exception as exc:
+            now = time.time()
+            if now - self._last_dynamic_card_plus_error_log_at > 60:
+                self._last_dynamic_card_plus_error_log_at = now
+                logger.debug(f"[ContextAware] DynamicCardPlus aliases unavailable: {exc}")
+
+        return tuple(aliases[: self._dynamic_card_plus_alias_max_count])
+
+    def _matched_dynamic_card_plus_aliases(
+        self,
+        msg: MessageRecord,
+        aliases: list[str] | tuple[str, ...],
+    ) -> list[str]:
+        if not aliases or self._analyzer is None:
+            return []
+        alias_keys = {_clean_one_line(alias).casefold() for alias in aliases if alias}
+        matches: list[str] = []
+        seen: set[str] = set()
+        for source in (msg.content, msg.reply_to_name):
+            for name in self._analyzer.matched_bot_names(
+                source,
+                tuple(aliases),
+                limit=self._dynamic_card_plus_alias_max_count,
+            ):
+                if _clean_one_line(name).casefold() not in alias_keys:
+                    continue
+                _append_unique_text(matches, name, key_seen=seen)
+        return matches[: self._dynamic_card_plus_alias_max_count]
+
+    def _build_identity_hint(
+        self,
+        msg: MessageRecord,
+        dynamic_card_aliases: list[str] | tuple[str, ...] | None = None,
+    ) -> str:
         """构建“动态群名片就是你”的身份提示。"""
         if not self._dynamic_name_identity_hint_enabled:
             return ""
 
         names = _raw_bot_target_names(msg)
+        dynamic_names: list[str] = []
+        if self._dynamic_card_plus_identity_hint_enabled:
+            dynamic_names = self._matched_dynamic_card_plus_aliases(
+                msg, dynamic_card_aliases or ()
+            )
+            seen = {name.casefold() for name in names}
+            for name in dynamic_names:
+                _append_unique_text(names, name, key_seen=seen)
+
         if not names:
             return ""
 
-        template = self._dynamic_name_identity_template.strip()
+        template = (
+            self._dynamic_card_plus_identity_template.strip()
+            if dynamic_names and self._dynamic_card_plus_identity_template.strip()
+            else self._dynamic_name_identity_template.strip()
+        )
         if not template:
             return ""
 
@@ -1539,6 +1870,7 @@ class Main(star.Star):
         bot_names: list[str] = []
         if isinstance(bot_names_raw, list):
             bot_names = [str(n) for n in bot_names_raw if n]
+        self._base_bot_names = bot_names
 
         # v3.0.0: 支持自定义回复特征词
         custom_starters = self._cfg_list("reply_starters", None)
@@ -1841,6 +2173,9 @@ class Main(star.Star):
             elif isinstance(comp, Reply):
                 if comp.sender_id:
                     msg.reply_to_id = str(comp.sender_id)
+                reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
+                if reply_name:
+                    msg.reply_to_name = reply_name
 
         return msg
 
@@ -1869,6 +2204,8 @@ class Main(star.Star):
 
         assert self._analyzer is not None
 
+        dynamic_card_aliases = self._dynamic_card_plus_aliases(event)
+
         # 使用支持图像转述的方法提取消息
         msg = await self._extract_message_with_caption(event)
         snapshot = await self._sessions.get_snapshot_async(event.unified_msg_origin)
@@ -1877,6 +2214,7 @@ class Main(star.Star):
             snapshot.messages,
             bot_replied_to=snapshot.bot_last_replied_to,
             bot_replied_to_name=snapshot.bot_last_replied_to_name,
+            extra_bot_names=dynamic_card_aliases,
         )
 
         # v3.0.0: 推断规则日志（可观测性增强）
@@ -1927,12 +2265,17 @@ class Main(star.Star):
 
         assert self._analyzer is not None
         self._warn_if_builtin_ltm_enabled(event)
+        dynamic_card_aliases = self._dynamic_card_plus_aliases(event)
 
         umo = event.unified_msg_origin
         if not self._sessions.has_session(umo):
             # 使用支持图像转述的方法
             msg = await self._extract_message_with_caption(event)
-            self._analyzer.infer_addressee(msg, [])
+            self._analyzer.infer_addressee(
+                msg,
+                [],
+                extra_bot_names=dynamic_card_aliases,
+            )
             try:
                 event.set_extra(ExtraKeys.CURRENT_MESSAGE_RECORD, msg)
             except Exception:
@@ -2000,7 +2343,11 @@ class Main(star.Star):
                     except Exception:
                         pass
 
-            trigger_type, trigger_desc = self._analyzer.detect_trigger(event, current)
+            trigger_type, trigger_desc = self._analyzer.detect_trigger(
+                event,
+                current,
+                extra_bot_names=dynamic_card_aliases,
+            )
 
             window = self._cfg_int("dialogue_window", 8)
             flow = flow_source[-window:] if window > 0 else flow_source
@@ -2026,7 +2373,7 @@ class Main(star.Star):
                 }
 
             participants = list({m.sender_name for m in flow if not m.is_bot})
-            identity_hint = self._build_identity_hint(current)
+            identity_hint = self._build_identity_hint(current, dynamic_card_aliases)
 
             scene = self._scene_generator.generate(
                 trigger_type=trigger_type,
