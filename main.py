@@ -2326,6 +2326,20 @@ class Main(star.Star):
                         flow_source = flow_source[: idx + 1]
                 except Exception:
                     pass
+
+                if current.talking_to == "group" and dynamic_card_aliases:
+                    current_history = (
+                        flow_source[:-1]
+                        if flow_source and flow_source[-1].msg_id == current.msg_id
+                        else flow_source
+                    )
+                    self._analyzer.infer_addressee(
+                        current,
+                        current_history,
+                        bot_replied_to=snapshot.bot_last_replied_to,
+                        bot_replied_to_name=snapshot.bot_last_replied_to_name,
+                        extra_bot_names=dynamic_card_aliases,
+                    )
                 
             # 可选：压缩历史（会裁剪 flow_source 对应的底层会话）
             snapshot2 = await self._maybe_compress_history(umo, snapshot)
