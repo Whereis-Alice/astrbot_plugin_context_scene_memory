@@ -13,6 +13,27 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.2.3
+
+本版本是对上游 `v3.3.0`、`v3.3.1` 的筛选式手工升级，不覆盖分叉版已有的动态群名片适配和会话级 Provider 选择。
+
+### 新增
+
+- 新增 `strict_mode`，默认关闭。开启后，只有在主动或未知触发且当前仅由上下文推断为“正在和 Bot 说话”时，才会回退为群聊。
+- `strict_mode` 不会覆盖 `@`、回复、唤醒词或 Dynamic Card Plus 动态名片文本点名等明确触发证据。
+
+### 改进
+
+- 兼容 QQ/NapCat 等平台直接传入 `data:image/...;base64,...` 图片的场景。图像转述会将其解码为短临时本地文件路径再调用视觉 Provider，避免部分 Provider 将超长 data URI 当作文件名而出现 `[Errno 36] File name too long`。
+- data URI 在内存 LRU 中使用完整 SHA-256 摘要作为缓存键，不再把超长 base64 原文保留在缓存中。
+- 图像转述超时、空响应、临时文件转换失败和异常都会写入失败哨兵；同一图片后续不会反复请求视觉模型。
+- 保留按 `unified_msg_origin` 获取当前会话 Provider 的分叉行为，避免多模型或多会话时转述请求误用全局默认 Provider。
+- 修正规则 4 的插话保护时间基准，改为以当前消息判断此前对话是否仍在 60 秒窗口内。
+
+### 未引入
+
+- 未直接引入上游的延迟图像转述、远程图片下载缓存和后台清理任务。这些功能会新增网络下载、持久化缓存和生命周期管理；当前分叉保持即时转述，只为 data URI 创建并清理临时文件。
+
 ## v3.2.2
 
 适配 `astrbot_plugin_dynamic_card_plus`，减少动态群名片导致的“Bot 被当成另一个人或另一个 AI”的误判。

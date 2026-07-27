@@ -16,11 +16,13 @@ help: |
   - 识别 @、回复、唤醒词、主动触发、戳一戳等场景
   - 同步上游图片上下文、GIF 过滤、语音转写上下文与内置 LTM 警告
   - 可选图像转述、最近图片提示与历史摘要压缩
+  - 兼容 QQ/NapCat 等平台传入的 base64 data URI 图片，避免图像转述路径过长报错
+  - 可选严格模式：主动/未知触发时减少把群聊误判为对 Bot 说话
   - 可选动态群名片身份提示，缓解“@到动态昵称却被模型当成另一个AI”的误判
   - 适配 astrbot_plugin_dynamic_card_plus，把当前群名片识别为 Bot 自己
 
   更详细的来源说明、配置说明和变更记录请查看 README.md 与 CHANGELOG.md。
-version: 3.2.2
+version: 3.2.3
 author: Huli3（fork 自 木有知）
 repo: https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory
 astrbot_version: ">=4.24.0"

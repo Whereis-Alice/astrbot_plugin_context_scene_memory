@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版 `v3.2.2` 已同步上游 `v3.1.6` 的主要更新，同时保留本分叉的插件标识、动态群名片提示、结构化消息记录、临时场景注入修复，并新增对 `astrbot_plugin_dynamic_card_plus` 的适配。
+当前分叉版为 `v3.2.3`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0` 与 `v3.3.1` 中适合本分叉的图像转述稳定性改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。
 
 ## 这个插件做什么
 
@@ -49,6 +49,7 @@ provider_settings:
 | `show_recent_images` | `true` | 单独注入最近图片上下文 |
 | `show_recent_images_allow_gif` | `false` | 默认过滤 GIF，避免部分模型不支持 `image/gif` |
 | `voice_context_window` | `50` | 单独扫描最近语音转写 |
+| `strict_mode` | `false` | 主动/未知触发时更保守，降低 Bot 误把群聊当成对自己说话的概率 |
 | `history_compress_strategy` | `off` | 上下文真的太长时再改为 `llm_summary` |
 
 如果你使用动态改名插件，建议保留：
@@ -72,6 +73,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `dialogue_window` | 每轮注入最近多少条对话流，默认 `8` |
 | `enable_dialogue_flow` | 是否显示最近对话流 |
 | `debug_inference` | 输出说话对象推断日志 |
+| `strict_mode` | 仅在主动或未知触发时，撤销低置信度的“正在和 Bot 说话”推断。默认关闭；不会覆盖 `@`、回复或动态群名片文本点名等明确证据 |
 | `reply_starters` | 自定义“像是在回复 Bot”的前缀词 |
 
 ### 动态群名片
@@ -99,7 +101,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `image_caption_timeout` | 图像转述超时时间 |
 | `voice_context_window` | 从最近 N 条消息里提取语音转写，`0` 表示关闭 |
 
-图片上下文会以 `<recent_images>` 注入；语音转写会以 `<recent_voice_transcripts>` 注入。未开启图像转述时，图片会使用 AstrBot 消息概要或 `[图片]` 占位。
+图片上下文会以 `<recent_images>` 注入；语音转写会以 `<recent_voice_transcripts>` 注入。未开启图像转述时，图片会使用 AstrBot 消息概要或 `[图片]` 占位。启用图像转述后，QQ/NapCat 等平台传入的 `data:image/...;base64,...` 图片会在本次视觉调用内转换为临时本地文件，避免超长 data URI 被部分 Provider 误当成文件名；临时文件在调用结束后会自动删除。
 
 ### 历史压缩
 
@@ -123,12 +125,16 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 新增 `dynamic_card_plus_compat` 等配置，适配 `astrbot_plugin_dynamic_card_plus` 的动态群名片别名。
 - 图像转述默认按当前会话选择 provider，适配多模型和多会话场景。
 
-## 已同步的上游能力
+## 手工吸收的上游改进
 
 - 上游 `v3.1.3`：图片概要上下文和 AstrBot `>=4.24.0` 临时注入要求。
 - 上游 `v3.1.4`：最近图片上下文支持 GIF 过滤。
 - 上游 `v3.1.5`：兼容 Gemini_STT 语音转写，并按消息 ID 幂等写入。
 - 上游 `v3.1.6`：语音转写独立上下文窗口，避免高频群聊把语音挤出最近对话流。
+- 上游 `v3.3.0`：图像转述失败哨兵缓存，以及可配置的严格触发模式。
+- 上游 `v3.3.1`：兼容平台直接传入的 base64 data URI 图片。分叉版改为使用短临时本地路径，而非重新传递 data URI，以适配 OpenAI、Gemini、Anthropic 等不同 Provider 的本地文件处理逻辑。
+
+上游的延迟图像转述、远程图片下载缓存和常驻清理任务没有直接引入。它们会增加网络下载、磁盘缓存和生命周期管理的复杂度；当前版本保留即时转述的简单行为，并只在遇到 data URI 时创建短生命周期临时文件。
 
 ## 公开 API
 

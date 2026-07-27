@@ -84,6 +84,12 @@
     "default": false,
     "hint": "启用后会在日志中输出每条消息的对话对象推断过程"
   },
+  "strict_mode": {
+    "description": "主动或未知触发时严格避免误判为在和 Bot 说话",
+    "type": "bool",
+    "default": false,
+    "hint": "仅在主动/未知触发且当前只由上下文推断为对 Bot 说话时回退为群聊；不会覆盖 @、回复或动态群名片文本点名等明确证据。"
+  },
   "reply_starters": {
     "description": "回复特征词（用于判断用户是否在回复Bot）",
     "type": "list",

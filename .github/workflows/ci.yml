@@ -21,10 +21,4 @@ jobs:
           elif [ -f pyproject.toml ]; then pip install .;
           else echo "No requirements/pyproject; skipping"; fi
       - name: Run tests
-        run: |
-          if python -c "import os,sys; sys.exit(0 if os.path.exists("pytest.ini") or os.path.exists("pyproject.toml") else 1)"; then
-            python -m pip install pytest || true
-            pytest -q || (echo "pytest failed"; exit 1)
-          else
-            echo "No test config detected; skipping"
-          fi
+        run: python -m unittest discover -s tests -v

@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.2.2 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.2.3 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,13 @@ AstrBot 上下文场景记忆增强插件 v3.2.2 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.2.3 分叉版更新:
+- [FIX] 兼容平台传入的 base64 data URI 图片：转述时改用临时本地文件路径，
+  避免部分 Provider 将超长 data URI 当作文件名而报错
+- [NEW] 新增 strict_mode：可在主动/未知触发时禁止低置信度的“正在和 Bot 说话”推断
+- [FIX] 图像转述失败会缓存空结果，避免对同一图片持续重试
+- [FIX] 修正规则4的插话保护时间基准，按当前消息判断近期对话
 
 v3.2.2 分叉版更新:
 - [NEW] 适配 astrbot_plugin_dynamic_card_plus，自动读取基础名字、当前群名片和近期名片作为 Bot 文本别名
@@ -67,13 +74,17 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.2.2
+Version: 3.2.3
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import os
 import re
+import tempfile
 import time
 import uuid
 from collections import OrderedDict, deque
@@ -152,6 +163,19 @@ DEFAULT_REPLY_STARTERS: Final = frozenset({
     "明白", "知道了", "了解", "可以", "行", "没问题",
     "ok", "OK", "Ok", "好滴", "好哒", "好嘞", "okok",
 })
+
+# 单张 data URI 图片的解码上限，避免异常消息占用过多内存和临时磁盘空间。
+IMAGE_CAPTION_DATA_URI_MAX_BYTES: Final = 50 * 1024 * 1024
+_DATA_URI_IMAGE_SUFFIXES: Final[dict[str, str]] = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "image/x-icon": ".ico",
+    "image/vnd.microsoft.icon": ".ico",
+}
 
 
 # ============================================================================
@@ -1165,7 +1189,8 @@ class SceneAnalyzer:
                         if m.talking_to == msg.sender_id:
                             prev_to_user = m
                             break
-                    if prev_to_user and (last.timestamp - prev_to_user.timestamp) < 60:
+                    # 插话保护应以当前消息为基准，不能只看 Bot 插话发生得多快。
+                    if prev_to_user and (msg.timestamp - prev_to_user.timestamp) < 60:
                         msg.talking_to, msg.talking_to_name = (
                             prev_to_user.sender_id,
                             prev_to_user.sender_name,
@@ -1550,6 +1575,7 @@ class Main(star.Star):
         self._show_recent_images_allow_gif = self._cfg_bool("show_recent_images_allow_gif", False)
         self._image_context_window = max(1, self._cfg_int("image_context_window", 20))
         self._voice_context_window = max(0, self._cfg_int("voice_context_window", 50))
+        self._strict_mode = self._cfg_bool("strict_mode", False)
         self._builtin_ltm_warned: set[str] = set()
 
         # 图像转述配置
@@ -1561,7 +1587,7 @@ class Main(star.Star):
 
         # v3.0.0: 图像转述并发控制
         self._image_caption_semaphore = asyncio.Semaphore(3)  # 最多并发3个
-        self._image_caption_cache: OrderedDict[str, str] = OrderedDict()  # URL -> caption (LRU)
+        self._image_caption_cache: OrderedDict[str, str] = OrderedDict()  # 图片引用 -> caption/失败哨兵 (LRU)
         self._image_caption_cache_max = 100  # 硬上限
         # 用户可配置超时（范围校验：10-600秒，与 schema 对齐）
         _timeout_cfg = self._cfg_int("image_caption_timeout", 60)
@@ -1592,7 +1618,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.2"
+        version = "3.2.3"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1625,6 +1651,22 @@ class Main(star.Star):
         if isinstance(val, list):
             return [str(v) for v in val if v]
         return default or []
+
+    def _apply_strict_mode(self, trigger_type: str, current: MessageRecord) -> bool:
+        """在不明确的触发场景中撤销低置信度的 Bot 对话推断。"""
+        if (
+            not self._strict_mode
+            or trigger_type not in (TRIGGER_ACTIVE, TRIGGER_UNKNOWN)
+            or current.talking_to != "bot"
+        ):
+            return False
+
+        current.talking_to = "group"
+        current.talking_to_name = "群聊"
+        logger.debug(
+            f"[ContextAware] strict_mode: {current.sender_name} 的 talking_to 重置为群聊"
+        )
+        return True
 
     def _dynamic_card_plus_plugin(self) -> Any | None:
         if not self._dynamic_card_plus_compat_enabled:
@@ -2020,22 +2062,118 @@ class Main(star.Star):
             await self._sessions.clear_compressing_async(umo)
             return snapshot
 
+    @staticmethod
+    def _image_caption_cache_key(image_ref: str) -> str:
+        """为 data URI 使用短哈希键，避免把完整 base64 文本留在 LRU 缓存中。"""
+        if image_ref.lower().startswith("data:"):
+            digest = hashlib.sha256(image_ref.encode("utf-8")).hexdigest()
+            return f"data:sha256:{digest}"
+        return image_ref
+
+    def _get_cached_image_caption(self, cache_key: str) -> tuple[bool, str | None]:
+        if cache_key not in self._image_caption_cache:
+            return False, None
+        self._image_caption_cache_hits += 1
+        self._image_caption_cache.move_to_end(cache_key)
+        cached = self._image_caption_cache[cache_key]
+        return True, cached or None
+
+    def _cache_image_caption(self, cache_key: str, caption: str) -> None:
+        self._image_caption_cache[cache_key] = caption
+        self._image_caption_cache.move_to_end(cache_key)
+        while len(self._image_caption_cache) > self._image_caption_cache_max:
+            self._image_caption_cache.popitem(last=False)
+
+    def _mark_image_caption_failed(self, cache_key: str) -> None:
+        """缓存失败哨兵，避免同一不可转述图片持续调用视觉模型。"""
+        self._cache_image_caption(cache_key, "")
+
+    @staticmethod
+    def _save_data_uri_to_local(data_uri: str) -> str | None:
+        """将图片 data URI 保存为临时文件，供所有 Provider 使用短本地路径读取。"""
+        file_descriptor: int | None = None
+        local_path = ""
+        try:
+            header, separator, encoded = data_uri.partition(",")
+            header_lower = header.lower()
+            if (
+                not separator
+                or not header_lower.startswith("data:image/")
+                or ";base64" not in header_lower
+            ):
+                raise ValueError("不是受支持的 base64 图片 data URI")
+
+            mime_type = header[5:].split(";", 1)[0].strip().lower()
+            suffix = _DATA_URI_IMAGE_SUFFIXES.get(mime_type, ".img")
+            encoded = encoded.strip()
+            if not encoded:
+                raise ValueError("data URI 不包含图片数据")
+            estimated_size = len(encoded) * 3 // 4
+            if estimated_size > IMAGE_CAPTION_DATA_URI_MAX_BYTES:
+                raise ValueError(
+                    f"data URI 图片超过 {IMAGE_CAPTION_DATA_URI_MAX_BYTES // (1024 * 1024)} MB 上限"
+                )
+
+            # 部分平台会省略末尾 padding，补齐后再严格验证其余内容。
+            padding = "=" * (-len(encoded) % 4)
+            raw = base64.b64decode(encoded + padding, validate=True)
+            if not raw:
+                raise ValueError("data URI 图片数据为空")
+            if len(raw) > IMAGE_CAPTION_DATA_URI_MAX_BYTES:
+                raise ValueError(
+                    f"data URI 图片超过 {IMAGE_CAPTION_DATA_URI_MAX_BYTES // (1024 * 1024)} MB 上限"
+                )
+
+            file_descriptor, local_path = tempfile.mkstemp(
+                prefix="astrbot_context_scene_memory_",
+                suffix=suffix,
+            )
+            with os.fdopen(file_descriptor, "wb") as image_file:
+                file_descriptor = None
+                image_file.write(raw)
+            return local_path
+        except Exception as e:
+            if file_descriptor is not None:
+                try:
+                    os.close(file_descriptor)
+                except OSError:
+                    pass
+            if local_path:
+                try:
+                    os.remove(local_path)
+                except OSError:
+                    pass
+            logger.warning(f"[ContextAware] data URI 图片临时落盘失败: {e}")
+            return None
+
     async def _get_image_caption(self, image_url: str, umo: str | None = None) -> str | None:
-        """获取图片描述（v3.0.0: 并发限流 + 超时 + 缓存）"""
+        """获取图片描述（并发限流、超时、LRU 缓存与 data URI 兼容）。"""
         if not self._image_caption_enabled:
             return None
 
-        # 缓存命中检查
-        if image_url in self._image_caption_cache:
-            self._image_caption_cache_hits += 1
-            # 移动到末尾（LRU 更新）
-            self._image_caption_cache.move_to_end(image_url)
-            return self._image_caption_cache[image_url]
+        cache_key = self._image_caption_cache_key(image_url)
+        cache_hit, cached_caption = self._get_cached_image_caption(cache_key)
+        if cache_hit:
+            return cached_caption
 
+        temporary_image_path: str | None = None
         try:
-            # 并发限流
             async with self._image_caption_semaphore:
-                # 获取 provider
+                # 排队期间可能已有同一张图片完成转述，进入临界区后再次检查。
+                cache_hit, cached_caption = self._get_cached_image_caption(cache_key)
+                if cache_hit:
+                    return cached_caption
+
+                effective_image_url = image_url
+                if image_url.lower().startswith("data:"):
+                    temporary_image_path = self._save_data_uri_to_local(image_url)
+                    if not temporary_image_path:
+                        self._image_caption_errors += 1
+                        self._mark_image_caption_failed(cache_key)
+                        return None
+                    # 不再传递原始 data URI，兼容会把 data: 当文件路径的 Provider。
+                    effective_image_url = temporary_image_path
+
                 provider = None
                 if self._image_caption_provider_id:
                     provider = self._context.get_provider_by_id(self._image_caption_provider_id)
@@ -2045,45 +2183,50 @@ class Main(star.Star):
                         )
                         return None
                 else:
+                    # 保留分叉版的会话级 Provider 选择，不能退回全局默认 Provider。
                     provider = self._context.get_using_provider(umo)
 
                 if not provider or not isinstance(provider, Provider):
                     logger.warning("[ContextAware] 无法获取有效的 Provider 进行图像转述")
                     return None
 
-                # 调用 LLM 获取图片描述（带超时）
                 try:
                     response = await asyncio.wait_for(
                         provider.text_chat(
                             prompt=self._image_caption_prompt,
-                            image_urls=[image_url],
+                            image_urls=[effective_image_url],
                         ),
-                        timeout=self._image_caption_timeout
+                        timeout=self._image_caption_timeout,
                     )
                 except asyncio.TimeoutError:
                     self._image_caption_errors += 1
+                    self._mark_image_caption_failed(cache_key)
                     logger.warning(f"[ContextAware] 图像转述超时 ({self._image_caption_timeout}s)")
                     return None
 
                 if response and response.completion_text:
                     self._image_caption_count += 1
                     caption = response.completion_text.strip()
-                    # 限制长度
                     if len(caption) > 100:
                         caption = caption[:97] + "..."
-                    # 缓存结果（使用 OrderedDict 实现 LRU）
-                    self._image_caption_cache[image_url] = caption
-                    # LRU 淘汰：超过硬上限时移除最旧的
-                    while len(self._image_caption_cache) > self._image_caption_cache_max:
-                        self._image_caption_cache.popitem(last=False)
+                    self._cache_image_caption(cache_key, caption)
                     logger.debug(f"[ContextAware] 图像转述成功: {caption[:30]}...")
                     return caption
 
+                self._mark_image_caption_failed(cache_key)
+                return None
+
         except Exception as e:
             self._image_caption_errors += 1
+            self._mark_image_caption_failed(cache_key)
             logger.error(f"[ContextAware] 图像转述失败: {e}")
-
-        return None
+            return None
+        finally:
+            if temporary_image_path:
+                try:
+                    os.remove(temporary_image_path)
+                except OSError:
+                    pass
 
     async def _extract_message_with_caption(
         self, event: AstrMessageEvent
@@ -2362,6 +2505,8 @@ class Main(star.Star):
                 current,
                 extra_bot_names=dynamic_card_aliases,
             )
+
+            self._apply_strict_mode(trigger_type, current)
 
             window = self._cfg_int("dialogue_window", 8)
             flow = flow_source[-window:] if window > 0 else flow_source
