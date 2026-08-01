@@ -13,6 +13,21 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.2.4
+
+本版本核对上游最新 `v3.4.3` 后，手工吸收其中与会话一致性直接相关的低风险改进；不覆盖分叉版已有的动态群名片适配、会话级 Provider 选择和临时场景注入。
+
+### 新增
+
+- 在记录消息前识别 `/reset` 和 `/new`，先清理当前 UMO 的插件上下文，再让 AstrBot 或其他插件继续处理命令。
+- 兼容 `astrbot_plugin_cmdmask` 的伪装指令，使用其 target extra 中的真实命令判断是否需要清理。
+- 兼容 AstrBot 新版 `_clean_group_context_session` 和旧版 `_clean_ltm_session` 会话清理标记。
+
+### 兼容性
+
+- 本插件不注册 `/reset`、`/new`，不会抢占命令，也不会把清空命令本身写进历史。
+- 上游 `v3.4.0` 之后的图片压缩、引用图片归一化和 GIF 首帧处理暂不引入，避免给当前无额外依赖的图片转述链路增加请求改写与缓存生命周期风险。
+
 ## v3.2.3
 
 本版本是对上游 `v3.3.0`、`v3.3.1` 的筛选式手工升级，不覆盖分叉版已有的动态群名片适配和会话级 Provider 选择。

@@ -22,7 +22,7 @@ help: |
   - 适配 astrbot_plugin_dynamic_card_plus，把当前群名片识别为 Bot 自己
 
   更详细的来源说明、配置说明和变更记录请查看 README.md 与 CHANGELOG.md。
-version: 3.2.3
+version: 3.2.4
 author: Huli3（fork 自 木有知）
 repo: https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory
 astrbot_version: ">=4.24.0"

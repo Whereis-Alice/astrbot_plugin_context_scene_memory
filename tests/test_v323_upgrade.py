@@ -1,4 +1,4 @@
-"""v3.2.3 的回归测试，不依赖已安装的 AstrBot。"""
+"""v3.2.4 的回归测试，不依赖已安装的 AstrBot。"""
 
 from __future__ import annotations
 
@@ -181,6 +181,99 @@ def _make_caption_plugin(provider: CaptionProvider):
     return instance
 
 
+class CommandEvent:
+    def __init__(
+        self,
+        text: str,
+        *,
+        is_at_or_wake_command: bool = True,
+        extras: dict[str, object] | None = None,
+    ) -> None:
+        self.text = text
+        self.is_at_or_wake_command = is_at_or_wake_command
+        self.extras = extras or {}
+        self.unified_msg_origin = "umo:command-test"
+
+    def get_message_str(self) -> str:
+        return self.text
+
+    def get_extra(self, key: str, default=None):
+        return self.extras.get(key, default)
+
+
+class SessionResetTests(unittest.IsolatedAsyncioTestCase):
+    def _make_plugin(self):
+        instance = object.__new__(plugin.Main)
+        instance._sessions = plugin.SessionManager(max_messages=10, max_sessions=10)
+        instance._enabled = True
+        instance._group_only = False
+        return instance
+
+    def test_extracts_native_reset_and_new_commands(self):
+        instance = self._make_plugin()
+
+        self.assertEqual(
+            instance._session_reset_command(CommandEvent("/reset extra")),
+            "reset",
+        )
+        self.assertEqual(
+            instance._session_reset_command(CommandEvent(".new")),
+            "new",
+        )
+        self.assertEqual(
+            instance._session_reset_command(CommandEvent("/reset", is_at_or_wake_command=False)),
+            "",
+        )
+
+    def test_extracts_cmdmask_target_instead_of_alias_text(self):
+        instance = self._make_plugin()
+        event = CommandEvent(
+            "/wipe",
+            extras={
+                plugin.ExtraKeys.CMDMASK_APPLIED: True,
+                plugin.ExtraKeys.CMDMASK_TARGET: "/reset",
+            },
+        )
+
+        self.assertEqual(instance._session_reset_command(event), "reset")
+
+    async def test_reset_command_is_cleared_before_recording(self):
+        instance = self._make_plugin()
+        await instance._sessions.add_message_async(
+            "umo:command-test",
+            plugin.MessageRecord(
+                msg_id="old",
+                sender_id="user",
+                sender_name="用户",
+                content="旧上下文",
+                timestamp=1,
+            ),
+        )
+
+        await instance.on_message(CommandEvent("/reset"))
+
+        self.assertFalse(instance._sessions.has_session("umo:command-test"))
+
+    async def test_after_message_sent_accepts_new_and_legacy_markers(self):
+        instance = self._make_plugin()
+        for marker in (
+            plugin.ExtraKeys.SESSION_CLEAN_GROUP,
+            plugin.ExtraKeys.SESSION_CLEAN_LEGACY,
+        ):
+            await instance._sessions.add_message_async(
+                "umo:command-test",
+                plugin.MessageRecord(
+                    msg_id=marker,
+                    sender_id="user",
+                    sender_name="用户",
+                    content="旧上下文",
+                    timestamp=1,
+                ),
+            )
+            await instance.after_message_sent(CommandEvent("", extras={marker: True}))
+            self.assertFalse(instance._sessions.has_session("umo:command-test"))
+
+
 def _png_data_uri() -> str:
     raw = b"\x89PNG\r\n\x1a\nscene-memory-test"
     return "data:image/png;base64," + base64.b64encode(raw).decode("ascii")
@@ -297,4 +390,3 @@ class InferenceSafetyTests(unittest.TestCase):
 
         self.assertEqual(reason, plugin.InferenceReason.RULE_4_BOT_REPLIED)
         self.assertEqual(current.talking_to, "bot")
-

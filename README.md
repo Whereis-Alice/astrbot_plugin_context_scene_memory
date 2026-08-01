@@ -1,16 +1,17 @@
 # 上下文场景记忆增强
 
-让 AstrBot 在群聊里更会“接上文”、少抢答、少认错说话对象。
+让 AstrBot 在群聊里更会“接上文”、少抢答、少认错说话对象，并在清空会话时同步清理插件自己的场景记忆。
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.2.3`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0` 与 `v3.3.1` 中适合本分叉的图像转述稳定性改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。
+当前分叉版为 `v3.2.4`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
 
 ## 这个插件做什么
 
 - 记录每个群的最近消息，让模型能接住前文，不会聊两句就忘。
 - 推断“谁在和谁说话”，在 LLM 请求前注入结构化场景提示。
 - 跟踪 Bot 最近回复对象、最近发言时间，减少主动回复时的误判。
+- 跟随 `/reset`、`/new` 和系统会话清理标记清空插件历史，避免旧上下文在新会话中复活。
 - 单独注入最近图片和语音转写上下文，避免普通对话窗口把它们挤掉。
 - 可选图像转述和历史摘要压缩，适合更长或更多媒体的群聊。
 
@@ -51,6 +52,8 @@ provider_settings:
 | `voice_context_window` | `50` | 单独扫描最近语音转写 |
 | `strict_mode` | `false` | 主动/未知触发时更保守，降低 Bot 误把群聊当成对自己说话的概率 |
 | `history_compress_strategy` | `off` | 上下文真的太长时再改为 `llm_summary` |
+
+会话清理不需要额外配置。本插件不注册 `/reset` 或 `/new` 指令，只监听 AstrBot 已识别的命令和清理标记，因此不会抢占其他插件的命令处理；安装了 `astrbot_plugin_cmdmask` 时，也会按它写入的真实命令目标清理上下文。
 
 如果你使用动态改名插件，建议保留：
 
@@ -124,6 +127,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 新增 `dynamic_name_identity_hint` 与 `dynamic_name_identity_template`，缓解动态名片被模型当成另一个 AI 的问题。
 - 新增 `dynamic_card_plus_compat` 等配置，适配 `astrbot_plugin_dynamic_card_plus` 的动态群名片别名。
 - 图像转述默认按当前会话选择 provider，适配多模型和多会话场景。
+- 在消息写入前识别 `/reset`、`/new`，并兼容 `astrbot_plugin_cmdmask` 的伪装指令；同时兼容 AstrBot 新旧会话清理标记。
 
 ## 手工吸收的上游改进
 
@@ -133,8 +137,9 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 上游 `v3.1.6`：语音转写独立上下文窗口，避免高频群聊把语音挤出最近对话流。
 - 上游 `v3.3.0`：图像转述失败哨兵缓存，以及可配置的严格触发模式。
 - 上游 `v3.3.1`：兼容平台直接传入的 base64 data URI 图片。分叉版改为使用短临时本地路径，而非重新传递 data URI，以适配 OpenAI、Gemini、Anthropic 等不同 Provider 的本地文件处理逻辑。
+- 上游 `v3.4.0`：吸收 `/reset`、`/new` 在记录前清空插件上下文，以及 `astrbot_plugin_cmdmask` 真实命令目标识别。
 
-上游的延迟图像转述、远程图片下载缓存和常驻清理任务没有直接引入。它们会增加网络下载、磁盘缓存和生命周期管理的复杂度；当前版本保留即时转述的简单行为，并只在遇到 data URI 时创建短生命周期临时文件。
+上游 `v3.4.0` 之后的图片压缩、远程图片下载缓存、引用文件归一化和 GIF 首帧处理没有直接引入。它们会改写请求中的图片组件并增加 Pillow、网络下载、磁盘缓存和生命周期管理复杂度；当前版本保留即时转述的简单行为，并只在遇到 data URI 时创建短生命周期临时文件。
 
 ## 公开 API
 

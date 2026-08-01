@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.2.3 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.2.4 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,10 @@ AstrBot 上下文场景记忆增强插件 v3.2.3 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.2.4 分叉版更新:
+- [FIX] 在记录消息前识别 `/reset` 和 `/new`，避免清空命令本身进入插件上下文
+- [FIX] 兼容 astrbot_plugin_cmdmask 的命令别名，按解析后的真实命令清理上下文
 
 v3.2.3 分叉版更新:
 - [FIX] 兼容平台传入的 base64 data URI 图片：转述时改用临时本地文件路径，
@@ -74,7 +78,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.2.3
+Version: 3.2.4
 """
 
 from __future__ import annotations
@@ -122,6 +126,14 @@ class ExtraKeys:
     GEMINI_STT_CACHE_ONLY: Final[str] = "_gemini_stt_cache_only"
     GEMINI_STT_SHOULD_REPLY: Final[str] = "_gemini_stt_should_reply"
     GEMINI_STT_REPLY_REASON: Final[str] = "_gemini_stt_reply_reason"
+
+    # AstrBot 会话清理标记：同时兼容新旧版本和第三方命令钩子
+    SESSION_CLEAN_GROUP: Final[str] = "_clean_group_context_session"
+    SESSION_CLEAN_LEGACY: Final[str] = "_clean_ltm_session"
+
+    # astrbot_plugin_cmdmask 用这些 extra 保存别名解析后的真实命令
+    CMDMASK_APPLIED: Final[str] = "__astrbot_plugin_cmdmask:applied"
+    CMDMASK_TARGET: Final[str] = "__astrbot_plugin_cmdmask:target"
     
     # 场景注入标记，防止重复注入
     SCENE_INJECTED_MARKER: Final[str] = "<!-- scene_memory_fork_v321 -->"
@@ -1618,7 +1630,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.3"
+        version = "3.2.4"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -1667,6 +1679,50 @@ class Main(star.Star):
             f"[ContextAware] strict_mode: {current.sender_name} 的 talking_to 重置为群聊"
         )
         return True
+
+    @staticmethod
+    def _extract_command_name(text: Any) -> str:
+        """提取事件文本中的首个命令名，忽略常见命令前缀。"""
+        if not isinstance(text, str):
+            return ""
+        token = re.split(r"\s+", text.strip(), maxsplit=1)[0]
+        return token.lstrip("/.!！。 ").casefold()
+
+    def _session_reset_command(self, event: AstrMessageEvent) -> str:
+        """识别原生命令和 cmdmask 解析后的 reset/new 命令。"""
+        if not getattr(event, "is_at_or_wake_command", False):
+            return ""
+
+        try:
+            get_extra = getattr(event, "get_extra", None)
+            if callable(get_extra) and get_extra(ExtraKeys.CMDMASK_APPLIED, False):
+                target = get_extra(ExtraKeys.CMDMASK_TARGET, "")
+                command_name = self._extract_command_name(target)
+                if command_name in {"reset", "new"}:
+                    return command_name
+
+            get_message_str = getattr(event, "get_message_str", None)
+            message_text = get_message_str() if callable(get_message_str) else ""
+            command_name = self._extract_command_name(message_text)
+            if command_name in {"reset", "new"}:
+                return command_name
+        except Exception:
+            # 第三方事件实现不应阻断正常消息流。
+            return ""
+        return ""
+
+    async def _clear_session_context(
+        self,
+        event: AstrMessageEvent,
+        reason: str,
+    ) -> None:
+        """清理当前 UMO 的插件上下文，并记录清理原因。"""
+        removed = await self._sessions.remove_session_async(event.unified_msg_origin)
+        if removed:
+            logger.info(
+                f"[ContextAware] 检测到 {reason}，已清理 "
+                f"{event.unified_msg_origin} 的 {removed} 条上下文记录"
+            )
 
     def _dynamic_card_plus_plugin(self) -> Any | None:
         if not self._dynamic_card_plus_compat_enabled:
@@ -2332,6 +2388,12 @@ class Main(star.Star):
         if not self._should_process(event):
             return
 
+        # reset/new 由 AstrBot 或其他插件继续处理，但不能进入本插件历史。
+        reset_command = self._session_reset_command(event)
+        if reset_command:
+            await self._clear_session_context(event, f"/{reset_command} 命令")
+            return
+
         message_outline = _event_message_outline(event)
         messages = event.get_messages()
         has_content = any(isinstance(c, (Plain, Image)) for c in messages)
@@ -2625,12 +2687,21 @@ class Main(star.Star):
     async def after_message_sent(self, event: AstrMessageEvent) -> None:
         """跟随系统 reset/new/switch 清空本插件会话上下文（不注册新指令，避免冲突）"""
         try:
-            if event.get_extra("_clean_ltm_session", False):
-                removed = await self._sessions.remove_session_async(event.unified_msg_origin)
-                if removed:
-                    logger.info(
-                        f"[ContextAware] 检测到会话清空标记，已清理 {event.unified_msg_origin} 的 {removed} 条上下文记录"
-                    )
+            get_extra = getattr(event, "get_extra", None)
+            if not callable(get_extra):
+                return
+
+            clean_marker = (
+                ExtraKeys.SESSION_CLEAN_GROUP
+                if get_extra(ExtraKeys.SESSION_CLEAN_GROUP, False)
+                else ExtraKeys.SESSION_CLEAN_LEGACY
+                if get_extra(ExtraKeys.SESSION_CLEAN_LEGACY, False)
+                else ""
+            )
+            reset_command = self._session_reset_command(event)
+            if clean_marker or reset_command:
+                reason = clean_marker or f"/{reset_command} 命令"
+                await self._clear_session_context(event, reason)
         except Exception as e:
             logger.error(f"[ContextAware] 清理会话失败: {e}")
 
