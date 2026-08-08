@@ -84,6 +84,29 @@
     "default": false,
     "hint": "启用后会在日志中输出每条消息的对话对象推断过程"
   },
+  "speaker_identity_mode": {
+    "description": "LLM 用户身份标签模式",
+    "type": "string",
+    "default": "platform_id",
+    "options": ["platform_id", "masked", "name_only"],
+    "labels": ["原始平台 ID（QQ 即 QQ 号）", "脱敏稳定标签", "仅昵称（不推荐）"],
+    "hint": "用于区分同名、改名或动态昵称的不同用户。默认把 AstrBot sender_id 发送给模型；QQ/OneBot 场景中即为 QQ 号。"
+  },
+  "speaker_attribution_guard": {
+    "description": "启用用户发言归因保护",
+    "type": "bool",
+    "default": true,
+    "hint": "明确要求模型只把相同身份标签的历史内容归属给当前用户，防止把其他群成员的话串到当前用户身上。"
+  },
+  "speaker_attribution_template": {
+    "description": "用户发言归因保护提示词",
+    "type": "text",
+    "default": "本轮当前用户的唯一身份标签是 {current_speaker}。只有当前消息，以及 speaker 身份标签完全等于 {current_speaker} 的历史内容，才能归属给这位用户。历史摘要、历史对话、图片和语音内容只属于其中各自标明的身份标签；除非身份标签完全一致，严禁把其他用户说过的话、做过的事、偏好或观点归因给当前用户。没有身份标签的历史仅可作为背景，不可作为当前用户曾经说过或做过某事的证据。",
+    "hint": "可用占位符: {current_speaker}（如 user:123456）。留空时使用内置保护提示词。",
+    "condition": {
+      "speaker_attribution_guard": true
+    }
+  },
   "strict_mode": {
     "description": "主动或未知触发时严格避免误判为在和 Bot 说话",
     "type": "bool",

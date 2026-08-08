@@ -13,6 +13,37 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.3.1
+
+本版本继续收紧同名用户场景中的归因链路，补足“Bot 上一句在回复谁”的精确标识。
+
+### 改进
+
+- 场景中的 `speaker` 统一为可直接比较的稳定身份键，例如 `user:<QQ号>`、`user:<脱敏摘要>` 或 `bot:self`；昵称保留在独立展示字段中，不再参与身份比较。
+- 最近对话、图片上下文和语音转写的 `talking_to` 现在也会附带稳定身份标签。Bot 回复过同名用户 A 后，用户 B 发言时，模型能明确区分那句 Bot 回复属于 A 而非 B。
+- 主动或未知触发时的“谁在和谁说话”指导同样使用身份标签，避免同名接收对象被昵称混淆。
+- `get_recent_messages()` 新增 `speaker_id`、`talking_to_id` 与 `talking_to_speaker`；保留原有 `talking_to` 字段，属于向后兼容的扩展。
+
+### 兼容性
+
+- `speaker_attribution_template` 中的 `{current_speaker}` 现在固定展开为可直接比较的身份键，例如 `user:123456`，便于自定义提示词与场景中的 `speaker` 字段精确对齐。
+
+## v3.3.0
+
+本版本修复群聊场景中“模型把其他成员的历史发言误认为当前用户说过”的归因问题。
+
+### 新增
+
+- 默认用 AstrBot `sender_id` 生成稳定的 `user:<平台ID>` 标签；QQ/OneBot 平台中该 ID 即 QQ 号，同名或改名成员不会再仅凭昵称被合并。
+- 当前消息、最近对话、图片上下文、语音转写、参与者列表、历史压缩输入和公开上下文 API 均使用同一身份标签。
+- 新增 `speaker_attribution_guard` 与 `speaker_attribution_template`。默认规则明确要求模型：只有身份标签完全相同的内容才能归属给当前用户；无身份标签的旧摘要只能作为背景。
+- 新增 `speaker_identity_mode`：默认 `platform_id`，可选 `masked` 脱敏稳定标签或 `name_only` 兼容旧行为。
+
+### 兼容性与隐私
+
+- `platform_id` 模式会把平台用户 ID 发给所选模型提供商；QQ/OneBot 场景下即 QQ 号。需要避免发送原始 ID 时，请改用 `masked`，归因精度仍保持稳定。
+- `get_recent_messages()` 增加 `sender_id` 与 `speaker` 字段，属于向后兼容的扩展。
+
 ## v3.2.4
 
 本版本核对上游最新 `v3.4.3` 后，手工吸收其中与会话一致性直接相关的低风险改进；不覆盖分叉版已有的动态群名片适配、会话级 Provider 选择和临时场景注入。

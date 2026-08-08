@@ -4,13 +4,14 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.2.4`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
+当前分叉版为 `v3.3.1`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
 
 ## 这个插件做什么
 
 - 记录每个群的最近消息，让模型能接住前文，不会聊两句就忘。
 - 推断“谁在和谁说话”，在 LLM 请求前注入结构化场景提示。
-- 跟踪 Bot 最近回复对象、最近发言时间，减少主动回复时的误判。
+- 用稳定平台 ID 标记消息发送者和明确接收对象，避免同名、改名或动态昵称成员之间串人。
+- 跟踪 Bot 最近回复对象、最近发言时间，并保留其精确身份标签，减少主动回复时的误判。
 - 跟随 `/reset`、`/new` 和系统会话清理标记清空插件历史，避免旧上下文在新会话中复活。
 - 单独注入最近图片和语音转写上下文，避免普通对话窗口把它们挤掉。
 - 可选图像转述和历史摘要压缩，适合更长或更多媒体的群聊。
@@ -22,6 +23,7 @@
 - 需要 AstrBot `>=4.24.0`。
 - 安装后请关闭 AstrBot 内置的「群聊上下文感知(原聊天记忆增强)」。
 - 插件标识是 `astrbot_plugin_context_scene_memory`，不要改回上游同名标识，否则后续同步和并存部署都容易冲突。
+- 默认会将 AstrBot 的平台用户 ID 发送给当前模型；QQ/OneBot 场景中该 ID 即 QQ 号。若不希望发送原始 ID，请把 `speaker_identity_mode` 改为 `masked`。
 
 建议的 AstrBot 配置：
 
@@ -44,6 +46,8 @@ provider_settings:
 | `enable` | `true` | 开启插件 |
 | `only_group_chat` | `true` | 群聊使用，私聊不做复杂场景分析 |
 | `record_structural_messages` | `true` | 记录纯 `@`、纯回复、`@全体`，减少 current 消息错位 |
+| `speaker_identity_mode` | `platform_id` | 默认使用 QQ/平台 ID 精确区分成员；介意原始 ID 时改为 `masked` |
+| `speaker_attribution_guard` | `true` | 强制模型按发送者和接收者的身份标签归属历史内容，建议保持开启 |
 | `dynamic_name_identity_hint` | `true` | 动态名片/状态昵称场景建议开启 |
 | `dynamic_card_plus_compat` | `true` | 自动识别 Dynamic Card Plus 当前群名片，减少把 Bot 当成另一个人的误判 |
 | `warn_builtin_ltm` | `true` | 检测到内置群聊上下文时输出警告 |
@@ -78,6 +82,16 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `debug_inference` | 输出说话对象推断日志 |
 | `strict_mode` | 仅在主动或未知触发时，撤销低置信度的“正在和 Bot 说话”推断。默认关闭；不会覆盖 `@`、回复或动态群名片文本点名等明确证据 |
 | `reply_starters` | 自定义“像是在回复 Bot”的前缀词 |
+
+### 用户身份归因
+
+| 配置项 | 说明 |
+| --- | --- |
+| `speaker_identity_mode` | `platform_id` 默认值会生成 `user:<平台ID>`，QQ/OneBot 中即为 `user:<QQ号>`；`masked` 用稳定 SHA-256 短标签替代原始 ID；`name_only` 只使用昵称，不建议用于多人群聊。 |
+| `speaker_attribution_guard` | 是否注入“不能把其他身份标签的历史内容归给当前用户”的强制规则。默认开启。 |
+| `speaker_attribution_template` | 归因保护提示词，可用 `{current_speaker}`，其值是可直接比较的身份键，如 `user:<QQ号>`。留空时使用内置默认值。 |
+
+场景中的当前消息会带有 `speaker="user:<平台ID>"`。历史对话、图片和语音也会把发送者写入同一个 `speaker` 字段，并在 `talking_to` 中标出明确接收对象的身份标签；因此 Bot 的上一句是回复给谁，也不会只靠昵称判断。这样即使两个人昵称一样，模型仍能区分是谁说过哪句话、哪一句是在回复谁。身份标签用于上下文归因，不是权限认证。
 
 ### 动态群名片
 
@@ -128,6 +142,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 新增 `dynamic_card_plus_compat` 等配置，适配 `astrbot_plugin_dynamic_card_plus` 的动态群名片别名。
 - 图像转述默认按当前会话选择 provider，适配多模型和多会话场景。
 - 在消息写入前识别 `/reset`、`/new`，并兼容 `astrbot_plugin_cmdmask` 的伪装指令；同时兼容 AstrBot 新旧会话清理标记。
+- 新增稳定用户身份标签和归因保护，避免将别的成员的历史发言、图片、语音或旧摘要错误归属给当前用户。
 
 ## 手工吸收的上游改进
 
@@ -150,6 +165,8 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - `has_session(unified_msg_origin)`
 - `remove_message(unified_msg_origin, msg_id)`
 - `remove_last_bot_response(unified_msg_origin)`
+
+`get_recent_messages()` 的每条记录还包含稳定的 `speaker_id`、兼顾可读性的 `speaker`、原始 `talking_to_id` 和带身份标签的 `talking_to_speaker`。原有的 `talking_to` 字段仍保留昵称化描述，便于旧调用方继续使用。
 
 ## 变更记录
 

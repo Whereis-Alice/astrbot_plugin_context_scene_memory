@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.2.4 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.3.1 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,16 @@ AstrBot 上下文场景记忆增强插件 v3.2.4 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.3.1 分叉版更新:
+- [FIX] 统一发送者的 speaker 身份键，并为 Bot 回复对象、@ 对象和推断对话对象补充稳定身份标签
+- [FIX] 同名用户场景下，模型可区分 Bot 的上一句具体回复给谁，避免把该回复或其后续上下文串给另一位同名用户
+- [API] get_recent_messages() 增加 speaker_id、talking_to_id、talking_to_speaker
+
+v3.3.0 分叉版更新:
+- [FIX] 为每位群成员注入稳定平台 ID（QQ 平台即 QQ 号），避免同名或改名成员的历史发言串人
+- [NEW] 新增可配置的用户发言归因保护，覆盖当前消息、对话流、图片、语音和历史摘要
+- [CONFIG] 新增 speaker_identity_mode、speaker_attribution_guard、speaker_attribution_template
 
 v3.2.4 分叉版更新:
 - [FIX] 在记录消息前识别 `/reset` 和 `/new`，避免清空命令本身进入插件上下文
@@ -78,7 +88,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.2.4
+Version: 3.3.0
 """
 
 from __future__ import annotations
@@ -210,6 +220,24 @@ class InferenceReason:
     DEFAULT_GROUP: Final[str] = "default_group"           # 默认群聊
 
 
+# LLM 看到的用户身份标签模式。平台 ID 在 QQ/OneBot 场景中即为 QQ 号。
+SPEAKER_IDENTITY_PLATFORM_ID: Final[str] = "platform_id"
+SPEAKER_IDENTITY_MASKED: Final[str] = "masked"
+SPEAKER_IDENTITY_NAME_ONLY: Final[str] = "name_only"
+_VALID_SPEAKER_IDENTITY_MODES: Final[frozenset[str]] = frozenset({
+    SPEAKER_IDENTITY_PLATFORM_ID,
+    SPEAKER_IDENTITY_MASKED,
+    SPEAKER_IDENTITY_NAME_ONLY,
+})
+DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE: Final[str] = (
+    "本轮当前用户的唯一身份标签是 {current_speaker}。只有当前消息，以及 speaker 身份标签"
+    "完全等于 {current_speaker} 的历史内容，才能归属给这位用户。历史摘要、历史对话、"
+    "图片和语音内容只属于其中各自标明的身份标签；除非身份标签完全一致，严禁把其他用户"
+    "说过的话、做过的事、偏好或观点归因给当前用户。没有身份标签的历史仅可作为背景，"
+    "不可作为当前用户曾经说过或做过某事的证据。"
+)
+
+
 # ============================================================================
 # Data Structures
 # ============================================================================
@@ -282,6 +310,69 @@ def _clean_one_line(value: Any) -> str:
     """压缩消息概要为单行文本，避免注入上下文时破坏结构。"""
     text = "" if value is None else str(value)
     return " ".join(text.replace("\r", " ").replace("\n", " ").split())
+
+
+def _normalize_speaker_identity_mode(value: Any) -> str:
+    """归一化身份标签模式，非法配置回退到原始平台 ID。"""
+    mode = _clean_one_line(value).casefold()
+    if mode in _VALID_SPEAKER_IDENTITY_MODES:
+        return mode
+    return SPEAKER_IDENTITY_PLATFORM_ID
+
+
+def _identity_key_from_values(sender_id: Any, sender_name: Any, mode: str) -> str:
+    """按配置从平台 ID 和昵称生成可直接比较的身份键。"""
+    mode = _normalize_speaker_identity_mode(mode)
+    normalized_id = _clean_one_line(sender_id).strip()
+    normalized_name = _clean_one_line(sender_name).strip() or "未知用户"
+
+    if mode == SPEAKER_IDENTITY_NAME_ONLY:
+        return f"name:{normalized_name}"
+    if not normalized_id:
+        return f"name:{normalized_name}"
+    if mode == SPEAKER_IDENTITY_MASKED:
+        digest = hashlib.sha256(normalized_id.encode("utf-8")).hexdigest()[:12]
+        return f"user:{digest}"
+    return f"user:{normalized_id}"
+
+
+def _speaker_identity_key(msg: MessageRecord, mode: str) -> str:
+    """生成供 LLM 归因的稳定身份键，不依赖容易变化的群昵称。"""
+    if msg.is_bot:
+        return "bot:self"
+    return _identity_key_from_values(msg.sender_id, msg.sender_name, mode)
+
+
+def _speaker_identity_label(msg: MessageRecord, mode: str) -> str:
+    """把昵称与稳定身份键一起呈现，兼顾可读性和精确归因。"""
+    if msg.is_bot:
+        return "你 [bot:self]"
+    sender_name = _clean_one_line(msg.sender_name).strip() or "未知用户"
+    return f"{sender_name} [{_speaker_identity_key(msg, mode)}]"
+
+
+def _unique_speaker_labels(
+    messages: list[MessageRecord],
+    mode: str,
+) -> list[str]:
+    """按稳定身份键去重并保留出现顺序，避免同名成员被合并。"""
+    labels: list[str] = []
+    seen: set[str] = set()
+    for msg in messages:
+        if msg.is_bot:
+            continue
+        key = _speaker_identity_key(msg, mode)
+        if key in seen:
+            continue
+        seen.add(key)
+        labels.append(_speaker_identity_label(msg, mode))
+    return labels
+
+
+def _format_speaker_attribution(template: Any, current_speaker: str) -> str:
+    """渲染当前请求的归因规则，保留一个安全且可配置的占位符。"""
+    text = _clean_one_line(template).strip() or DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE
+    return text.replace("{current_speaker}", current_speaker)
 
 
 def _append_unique_text(items: list[str], value: Any, *, key_seen: set[str] | None = None) -> None:
@@ -469,6 +560,21 @@ def _other_explicit_target_names(msg: MessageRecord) -> list[str]:
     ]
 
 
+def _other_explicit_target_labels(msg: MessageRecord, mode: str) -> list[str]:
+    """获取除 Bot 外其他被显式点名对象的稳定身份标签。"""
+    return [
+        _addressee_identity_label(
+            target_id,
+            target_name,
+            mode,
+            bot_label="你",
+            group_label="群聊",
+        )
+        for target_id, target_name in _explicit_addressees(msg)
+        if target_id != "bot"
+    ]
+
+
 def _raw_bot_target_names(msg: MessageRecord) -> list[str]:
     """获取消息里原始出现过的 Bot 名称/群名片，用于动态改名场景提示。"""
     names: list[str] = []
@@ -499,6 +605,87 @@ def _describe_addressee(
     if explicit_targets:
         return explicit_targets[0][1]
     return msg.talking_to_name or msg.talking_to
+
+
+def _addressee_identity_label(
+    target_id: Any,
+    target_name: Any,
+    mode: str,
+    *,
+    bot_label: str,
+    group_label: str,
+) -> str:
+    """为消息接收对象附上与发送者相同的稳定身份标签。"""
+    normalized_id = _clean_one_line(target_id).strip()
+    normalized_name = _clean_one_line(target_name).strip() or "未知用户"
+
+    if normalized_id == "bot":
+        return f"{bot_label} [bot:self]"
+    if normalized_id == "group":
+        return f"{group_label} [group:all]"
+
+    identity_key = _identity_key_from_values(
+        normalized_id,
+        normalized_name,
+        mode,
+    )
+    return f"{normalized_name} [{identity_key}]"
+
+
+def _describe_addressee_with_identity(
+    msg: MessageRecord,
+    *,
+    mode: str,
+    bot_label: str = "你（Bot）",
+    group_label: str = "群聊",
+    multi_target_bot_label: str = "你",
+) -> str:
+    """生成可由模型精确比对的接收对象描述，保留多 @ 场景。"""
+    explicit_targets = _explicit_addressees(msg, bot_label=multi_target_bot_label)
+    if len(explicit_targets) > 1:
+        labels = [
+            _addressee_identity_label(
+                target_id,
+                target_name,
+                mode,
+                bot_label=multi_target_bot_label,
+                group_label=group_label,
+            )
+            for target_id, target_name in explicit_targets
+        ]
+        return _format_name_list(labels)
+    if msg.talking_to == "bot":
+        return _addressee_identity_label(
+            "bot",
+            bot_label,
+            mode,
+            bot_label=bot_label,
+            group_label=group_label,
+        )
+    if msg.talking_to == "group":
+        return _addressee_identity_label(
+            "group",
+            group_label,
+            mode,
+            bot_label=bot_label,
+            group_label=group_label,
+        )
+    if explicit_targets:
+        target_id, target_name = explicit_targets[0]
+        return _addressee_identity_label(
+            target_id,
+            target_name,
+            mode,
+            bot_label=bot_label,
+            group_label=group_label,
+        )
+    return _addressee_identity_label(
+        msg.talking_to,
+        msg.talking_to_name,
+        mode,
+        bot_label=bot_label,
+        group_label=group_label,
+    )
 
 
 @dataclass(slots=True)
@@ -1296,6 +1483,9 @@ class SceneGenerator:
         summary: str = "",
         *,
         identity_hint: str = "",
+        speaker_identity_mode: str = SPEAKER_IDENTITY_PLATFORM_ID,
+        speaker_attribution_guard: bool = True,
+        speaker_attribution_template: str = DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE,
         show_flow: bool = True,
         show_recent_images: bool = True,
         show_recent_gifs: bool = True,
@@ -1306,6 +1496,9 @@ class SceneGenerator:
         esc = self._escape
         parts: list[str] = ["<conversation_scene>"]
         identity_hint = str(identity_hint or "").strip()
+        speaker_identity_mode = _normalize_speaker_identity_mode(speaker_identity_mode)
+        current_speaker_key = _speaker_identity_key(current, speaker_identity_mode)
+        current_speaker_label = _speaker_identity_label(current, speaker_identity_mode)
 
         # ===== 1. 触发类型 =====
         parts.append(f'  <trigger type="{trigger_type}">{esc(trigger_desc)}</trigger>')
@@ -1321,24 +1514,42 @@ class SceneGenerator:
         is_talking_to_bot = current.talking_to == "bot"
         is_talking_to_group = current.talking_to == "group"
 
-        addressee_desc = _describe_addressee(
+        addressee_desc = _describe_addressee_with_identity(
             current,
+            mode=speaker_identity_mode,
             bot_label="你（Bot）",
             group_label="群里所有人（非特定对象）",
             multi_target_bot_label="你",
         )
 
         parts.append(
-            f'  <current_message>'
-            f'\n    <sender>{esc(current.sender_name)}</sender>'
+            f'  <current_message speaker="{esc(current_speaker_key)}">'
+            f'\n    <sender>{esc(current_speaker_label)}</sender>'
             f'\n    <talking_to>{esc(addressee_desc)}</talking_to>'
             f'\n    <content>{esc(current.content[:80])}</content>'
             f'\n  </current_message>'
         )
 
+        if speaker_attribution_guard:
+            attribution = _format_speaker_attribution(
+                speaker_attribution_template,
+                current_speaker_key,
+            )
+            parts.append(
+                f'  <speaker_attribution current_speaker="{esc(current_speaker_key)}" '
+                f'current_sender="{esc(current_speaker_label)}">'
+                f"{esc(attribution)}"
+                "</speaker_attribution>"
+            )
+
         # ===== 3. 关键行为指导（重点！）=====
         instruction = self._generate_instruction(
-            trigger_type, current, is_talking_to_bot, is_talking_to_group, identity_hint
+            trigger_type,
+            current,
+            is_talking_to_bot,
+            is_talking_to_group,
+            identity_hint,
+            speaker_identity_mode,
         )
         if instruction:
             parts.append(f'  <instruction>{instruction}</instruction>')
@@ -1350,15 +1561,20 @@ class SceneGenerator:
         if show_flow and len(flow) > 1:
             flow_lines: list[str] = []
             for m in flow[-5:]:
-                to_name = _describe_addressee(
+                to_name = _describe_addressee_with_identity(
                     m,
+                    mode=speaker_identity_mode,
                     bot_label="你",
                     group_label="群",
                     multi_target_bot_label="你",
                 )
-                sender = "[你]" if m.is_bot else m.sender_name
+                sender_key = _speaker_identity_key(m, speaker_identity_mode)
+                sender = _speaker_identity_label(m, speaker_identity_mode)
                 preview = m.content[:20] + ("..." if len(m.content) > 20 else "")
-                flow_lines.append(f'    <m>{esc(sender)} → {esc(to_name)}: {esc(preview)}</m>')
+                flow_lines.append(
+                    f'    <m speaker="{esc(sender_key)}" sender="{esc(sender)}" '
+                    f'talking_to="{esc(to_name)}">{esc(preview)}</m>'
+                )
             parts.append('  <recent_flow>')
             parts.extend(flow_lines)
             parts.append('  </recent_flow>')
@@ -1373,19 +1589,22 @@ class SceneGenerator:
                 visible_image_count = max(m.image_count - m.gif_count, 0)
                 if m.has_gif and not show_recent_gifs and visible_image_count <= 0:
                     continue
-                to_name = _describe_addressee(
+                to_name = _describe_addressee_with_identity(
                     m,
+                    mode=speaker_identity_mode,
                     bot_label="你",
                     group_label="群",
                     multi_target_bot_label="你",
                 )
-                sender = "[你]" if m.is_bot else m.sender_name
+                sender_key = _speaker_identity_key(m, speaker_identity_mode)
+                sender = _speaker_identity_label(m, speaker_identity_mode)
                 preview_source = content or m.message_outline or "[图片]"
                 preview = preview_source[:120] + ("..." if len(preview_source) > 120 else "")
                 display_count = visible_image_count if m.has_gif and not show_recent_gifs else m.image_count
                 count_attr = f' count="{display_count}"' if display_count > 1 else ""
                 image_lines.append(
-                    f'    <image sender="{esc(sender)}" talking_to="{esc(to_name)}"{count_attr}>'
+                    f'    <image speaker="{esc(sender_key)}" sender="{esc(sender)}" '
+                    f'talking_to="{esc(to_name)}"{count_attr}>'
                     f"{esc(preview)}</image>"
                 )
             if image_lines:
@@ -1399,16 +1618,19 @@ class SceneGenerator:
             content = m.content or ""
             if not _looks_like_voice_transcript(content):
                 continue
-            to_name = _describe_addressee(
+            to_name = _describe_addressee_with_identity(
                 m,
+                mode=speaker_identity_mode,
                 bot_label="你",
                 group_label="群",
                 multi_target_bot_label="你",
             )
-            sender = "[你]" if m.is_bot else m.sender_name
+            sender_key = _speaker_identity_key(m, speaker_identity_mode)
+            sender = _speaker_identity_label(m, speaker_identity_mode)
             preview = content[:200] + ("..." if len(content) > 200 else "")
             voice_lines.append(
-                f'    <voice sender="{esc(sender)}" talking_to="{esc(to_name)}">'
+                f'    <voice speaker="{esc(sender_key)}" sender="{esc(sender)}" '
+                f'talking_to="{esc(to_name)}">'
                 f"{esc(preview)}</voice>"
             )
         if voice_lines:
@@ -1436,6 +1658,7 @@ class SceneGenerator:
         is_talking_to_bot: bool,
         is_talking_to_group: bool,
         identity_hint: str = "",
+        speaker_identity_mode: str = SPEAKER_IDENTITY_PLATFORM_ID,
     ) -> str:
         """
         生成行为指导 - 这是解决"误以为在问自己"问题的关键
@@ -1445,8 +1668,16 @@ class SceneGenerator:
         - 主动触发 → 必须明确告知 Bot 它是主动插入的
         - 未知触发 → 最保守处理
         """
-        shared_targets = _other_explicit_target_names(msg)
+        shared_targets = _other_explicit_target_labels(msg, speaker_identity_mode)
         bot_alias_note = str(identity_hint or "")
+        current_label = _speaker_identity_label(msg, speaker_identity_mode)
+        addressee_label = _describe_addressee_with_identity(
+            msg,
+            mode=speaker_identity_mode,
+            bot_label="你",
+            group_label="群聊",
+            multi_target_bot_label="你",
+        )
 
         # ===== 被明确呼叫，且同时点名了其他对象 =====
         if trigger in (TRIGGER_AT, TRIGGER_WAKE, TRIGGER_REPLY) and shared_targets:
@@ -1495,7 +1726,7 @@ class SceneGenerator:
 
             # A 在和 B 说话，Bot 主动插话
             return (
-                f"【重要】你是主动加入对话的！{msg.sender_name} 正在和 {msg.talking_to_name} 对话，不是在问你。"
+                f"【重要】你是主动加入对话的！{current_label} 正在和 {addressee_label} 对话，不是在问你。"
                 f"不要把别人的对话当成问你的。"
                 f"合适的做法：1)以旁观者身份补充 2)等待被问到再回答 3)保持沉默。"
             )
@@ -1516,7 +1747,7 @@ class SceneGenerator:
                 )
             
             return (
-                f"【注意】触发原因不明确。{msg.sender_name} 似乎在和 {msg.talking_to_name} 对话。"
+                f"【注意】触发原因不明确。{current_label} 似乎在和 {addressee_label} 对话。"
                 f"在不确定的情况下，建议保持沉默，避免误入他人对话。"
             )
 
@@ -1555,6 +1786,19 @@ class Main(star.Star):
         self._enabled = self._cfg_bool("enable", True)
         self._group_only = self._cfg_bool("only_group_chat", True)
         self._record_structural_messages = self._cfg_bool("record_structural_messages", True)
+        self._speaker_identity_mode = _normalize_speaker_identity_mode(
+            self._cfg("speaker_identity_mode", SPEAKER_IDENTITY_PLATFORM_ID)
+        )
+        self._speaker_attribution_guard_enabled = self._cfg_bool(
+            "speaker_attribution_guard", True
+        )
+        self._speaker_attribution_template = str(
+            self._cfg(
+                "speaker_attribution_template",
+                DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE,
+            )
+            or DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE
+        )
         self._dynamic_name_identity_hint_enabled = self._cfg_bool(
             "dynamic_name_identity_hint", True
         )
@@ -1630,7 +1874,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.2.4"
+        version = "3.3.0"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -2008,9 +2252,10 @@ class Main(star.Star):
     def _build_summary_input(self, msgs: list[MessageRecord], *, max_chars: int) -> str:
         lines: list[str] = []
         for m in msgs:
-            sender = "[你]" if m.is_bot else m.sender_name
-            to = _describe_addressee(
+            sender = _speaker_identity_label(m, self._speaker_identity_mode)
+            to = _describe_addressee_with_identity(
                 m,
+                mode=self._speaker_identity_mode,
                 bot_label="[你]",
                 group_label="群聊",
                 multi_target_bot_label="[你]",
@@ -2065,8 +2310,10 @@ class Main(star.Star):
                     instruction = (
                         "你是“群聊上下文压缩器”。请将下面这段群聊/机器人对话历史压缩成一段简洁中文摘要，要求：\n"
                         "1) 保留关键事实、结论、已达成的决定、正在讨论的话题、未解决的问题。\n"
-                        "2) 尽量保留人物关系与称呼（谁在对谁说什么），但不要逐条复述。\n"
-                        "3) 输出长度控制在 200-600 字，避免空话套话。\n"
+                        "2) 保留人物关系与称呼（谁在对谁说什么），但不要逐条复述。\n"
+                        "3) 每条事实、观点、行为和偏好必须保留其对应身份标签；绝不合并不同身份标签，"
+                        "也不得把未标明身份的内容归因给任何当前用户。\n"
+                        "4) 输出长度控制在 200-600 字，避免空话套话。\n"
                     )
 
                 to_summarize = snapshot.messages[:-keep_recent]
@@ -2593,7 +2840,7 @@ class Main(star.Star):
                     "content": snapshot.bot_last_content,
                 }
 
-            participants = list({m.sender_name for m in flow if not m.is_bot})
+            participants = _unique_speaker_labels(flow, self._speaker_identity_mode)
             identity_hint = self._build_identity_hint(current, dynamic_card_aliases)
 
             scene = self._scene_generator.generate(
@@ -2605,6 +2852,9 @@ class Main(star.Star):
                 participants=participants,
                 summary=snapshot.summary,
                 identity_hint=identity_hint,
+                speaker_identity_mode=self._speaker_identity_mode,
+                speaker_attribution_guard=self._speaker_attribution_guard_enabled,
+                speaker_attribution_template=self._speaker_attribution_template,
                 show_flow=bool(self._cfg("enable_dialogue_flow", True)),
                 show_recent_images=self._show_recent_images,
                 show_recent_gifs=self._show_recent_images_allow_gif,
@@ -2723,11 +2973,16 @@ class Main(star.Star):
 
         Returns:
             消息列表，每条消息包含:
+            - sender_id: 平台用户 ID（QQ 平台即 QQ 号）
             - sender_name: 发送者名称
+            - speaker_id: 供 LLM 精确比较的稳定身份键
+            - speaker: 供 LLM 归因的稳定身份标签
             - content: 消息内容
             - timestamp: 时间戳
             - is_bot: 是否为 Bot 消息
+            - talking_to_id: 接收对象的原始平台 ID 或内部目标标记
             - talking_to: 对话对象
+            - talking_to_speaker: 带稳定身份标签的对话对象
         """
         if not self._sessions.has_session(unified_msg_origin):
             return []
@@ -2739,12 +2994,23 @@ class Main(star.Star):
 
         return [
             {
+                "sender_id": msg.sender_id,
                 "sender_name": msg.sender_name,
+                "speaker_id": _speaker_identity_key(msg, self._speaker_identity_mode),
+                "speaker": _speaker_identity_label(msg, self._speaker_identity_mode),
                 "content": msg.content,
                 "timestamp": msg.timestamp,
                 "is_bot": msg.is_bot,
+                "talking_to_id": msg.talking_to,
                 "talking_to": _describe_addressee(
                     msg,
+                    bot_label="你",
+                    group_label="群聊",
+                    multi_target_bot_label="你",
+                ),
+                "talking_to_speaker": _describe_addressee_with_identity(
+                    msg,
+                    mode=self._speaker_identity_mode,
                     bot_label="你",
                     group_label="群聊",
                     multi_target_bot_label="你",
@@ -2789,8 +3055,9 @@ class Main(star.Star):
 
         lines.append("[最近的群聊消息]")
         for msg in messages:
-            name = "[你]" if msg["is_bot"] else msg["sender_name"]
-            lines.append(f"{name}: {msg['content']}")
+            lines.append(
+                f"{msg['speaker']} -> {msg['talking_to_speaker']}: {msg['content']}"
+            )
 
         return "\n".join(lines)
 

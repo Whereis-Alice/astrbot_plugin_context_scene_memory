@@ -1,4 +1,4 @@
-"""v3.2.4 的回归测试，不依赖已安装的 AstrBot。"""
+"""v3.3.0 的回归测试，不依赖已安装的 AstrBot。"""
 
 from __future__ import annotations
 
@@ -317,6 +317,137 @@ class ImageCaptionDataUriTests(unittest.IsolatedAsyncioTestCase):
             instance._image_caption_cache[plugin.Main._image_caption_cache_key(data_uri)],
             "",
         )
+
+
+class SpeakerAttributionTests(unittest.TestCase):
+    @staticmethod
+    def _message(
+        msg_id: str,
+        sender_id: str,
+        content: str,
+        **kwargs,
+    ):
+        return plugin.MessageRecord(
+            msg_id=msg_id,
+            sender_id=sender_id,
+            sender_name="同名用户",
+            content=content,
+            timestamp=1,
+            **kwargs,
+        )
+
+    def test_scene_keeps_same_nickname_users_separate_by_platform_id(self):
+        other = self._message(
+            "other",
+            "10001",
+            "这是另一位同名用户说过的话",
+            has_image=True,
+            image_count=1,
+        )
+        voice = self._message(
+            "voice",
+            "30003",
+            "[语音转写] 这是第三位同名用户的语音",
+        )
+        current = self._message("current", "20002", "这是当前用户的消息")
+        flow = [other, voice, current]
+
+        scene = plugin.SceneGenerator().generate(
+            trigger_type=plugin.TRIGGER_AT,
+            trigger_desc="当前用户明确呼叫你",
+            current=current,
+            flow=flow,
+            bot_status={},
+            participants=plugin._unique_speaker_labels(
+                flow,
+                plugin.SPEAKER_IDENTITY_PLATFORM_ID,
+            ),
+            summary="没有身份标签的旧摘要",
+            speaker_identity_mode=plugin.SPEAKER_IDENTITY_PLATFORM_ID,
+            speaker_attribution_guard=True,
+            speaker_attribution_template=plugin.DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE,
+            image_flow=[other],
+            voice_flow=[voice],
+        )
+
+        self.assertIn('<current_message speaker="user:20002">', scene)
+        self.assertIn('current_speaker="user:20002"', scene)
+        self.assertIn('current_sender="同名用户 [user:20002]"', scene)
+        self.assertIn('speaker="user:10001"', scene)
+        self.assertIn('speaker="user:30003"', scene)
+        self.assertIn('sender="同名用户 [user:10001]"', scene)
+        self.assertIn('sender="同名用户 [user:30003]"', scene)
+        self.assertIn("严禁把其他用户说过的话", scene)
+        self.assertIn("没有身份标签的历史仅可作为背景", scene)
+
+    def test_bot_reply_target_keeps_platform_identity_for_same_nickname_users(self):
+        previous = self._message("previous", "10001", "这是第一位同名用户的问题")
+        bot_reply = plugin.MessageRecord(
+            msg_id="bot",
+            sender_id="bot",
+            sender_name="[你]",
+            content="这是给第一位同名用户的回答",
+            timestamp=2,
+            is_bot=True,
+            talking_to="10001",
+            talking_to_name="同名用户",
+        )
+        current = self._message("current", "20002", "这是第二位同名用户的追问")
+
+        scene = plugin.SceneGenerator().generate(
+            trigger_type=plugin.TRIGGER_AT,
+            trigger_desc="当前用户明确呼叫你",
+            current=current,
+            flow=[previous, bot_reply, current],
+            bot_status={},
+            participants=plugin._unique_speaker_labels(
+                [previous, current],
+                plugin.SPEAKER_IDENTITY_PLATFORM_ID,
+            ),
+            speaker_identity_mode=plugin.SPEAKER_IDENTITY_PLATFORM_ID,
+        )
+
+        self.assertIn('speaker="bot:self"', scene)
+        self.assertIn('talking_to="同名用户 [user:10001]"', scene)
+        self.assertNotIn('talking_to="同名用户 [user:20002]"', scene)
+
+    def test_masked_mode_is_stable_without_exposing_platform_id(self):
+        first = self._message("first", "10001", "第一条")
+        same_person = self._message("same", "10001", "第二条")
+        other = self._message("other", "20002", "第三条")
+
+        first_key = plugin._speaker_identity_key(first, plugin.SPEAKER_IDENTITY_MASKED)
+        self.assertEqual(
+            first_key,
+            plugin._speaker_identity_key(same_person, plugin.SPEAKER_IDENTITY_MASKED),
+        )
+        self.assertNotEqual(
+            first_key,
+            plugin._speaker_identity_key(other, plugin.SPEAKER_IDENTITY_MASKED),
+        )
+        self.assertNotIn("10001", first_key)
+        self.assertTrue(first_key.startswith("user:"))
+
+    def test_summary_and_public_context_keep_speaker_identity(self):
+        first = self._message("first", "10001", "另一位用户的观点")
+        current = self._message("current", "20002", "当前用户的观点")
+        instance = object.__new__(plugin.Main)
+        instance._speaker_identity_mode = plugin.SPEAKER_IDENTITY_PLATFORM_ID
+        instance._sessions = plugin.SessionManager(max_messages=10, max_sessions=10)
+        instance._sessions.add_message("umo:identity", first)
+        instance._sessions.add_message("umo:identity", current)
+
+        summary_input = instance._build_summary_input([first, current], max_chars=1000)
+        recent = instance.get_recent_messages("umo:identity")
+        formatted = instance.get_formatted_context("umo:identity")
+
+        self.assertIn("同名用户 [user:10001]", summary_input)
+        self.assertIn("同名用户 [user:20002]", summary_input)
+        self.assertEqual(recent[0]["sender_id"], "10001")
+        self.assertEqual(recent[0]["speaker_id"], "user:10001")
+        self.assertEqual(recent[1]["speaker"], "同名用户 [user:20002]")
+        self.assertIn("同名用户 [user:10001]", formatted)
+        self.assertIn("同名用户 [user:20002]", formatted)
 
 
 class InferenceSafetyTests(unittest.TestCase):
