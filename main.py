@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.3.1 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.4.0 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,11 @@ AstrBot 上下文场景记忆增强插件 v3.3.1 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.4.0 分叉版更新:
+- [NEW] 新增默认关闭的 reply_direction_hint，为可靠的引用回复临时注入当前发言人、引用来源和 Bot 原始回复对象说明
+- [SAFE] QQ 官方 Bot、缺失引用发送者 ID 或引用 Bot 回复无法唯一定位时均不做不安全归因
+- [CLEAN] 仅在当前 ProviderRequest 副本中清理旧内部场景标记，并剥离模型误回显的内部标记
 
 v3.3.1 分叉版更新:
 - [FIX] 统一发送者的 speaker 身份键，并为 Bot 回复对象、@ 对象和推断对话对象补充稳定身份标签
@@ -236,6 +241,33 @@ DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE: Final[str] = (
     "说过的话、做过的事、偏好或观点归因给当前用户。没有身份标签的历史仅可作为背景，"
     "不可作为当前用户曾经说过或做过某事的证据。"
 )
+REPLY_DIRECTION_INJECTED_MARKER: Final[str] = (
+    "<!-- scene_memory_reply_direction_v340 -->"
+)
+DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE: Final[str] = (
+    "这是引用回复的临时指向说明：当前发言人是 {current_speaker}；"
+    "被引用消息的发送者是 {quoted_speaker}。{quoted_bot_reply_target_note}"
+    "仅按这些身份标签解释引用关系；除非身份标签一致，否则不要把被引用消息、"
+    "Bot 回复对象或其历史经历归属给当前发言人。"
+)
+_QQ_OFFICIAL_PLATFORM_NAMES: Final[frozenset[str]] = frozenset({
+    "qq_official",
+    "qqofficial",
+})
+_INTERNAL_SCENE_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!--\s*scene_memory_fork_v[\w.-]+\s*-->\s*"
+    r"<conversation_scene(?:\s[^>]*)?>.*?</conversation_scene\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_INTERNAL_REPLY_DIRECTION_BLOCK_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!--\s*scene_memory_reply_direction_v[\w.-]+\s*-->\s*"
+    r"<reply_direction(?:\s[^>]*)?>.*?</reply_direction\s*>",
+    re.IGNORECASE | re.DOTALL,
+)
+_INTERNAL_SCENE_MARKER_RE: Final[re.Pattern[str]] = re.compile(
+    r"<!--\s*scene_memory_(?:fork|reply_direction)_v[\w.-]+\s*-->",
+    re.IGNORECASE,
+)
 
 
 # ============================================================================
@@ -257,6 +289,9 @@ class MessageRecord:
     at_all: bool = False
     reply_to_id: str | None = None
     reply_to_name: str = ""
+    reply_to_message_id: str = ""
+    reply_to_content: str = ""
+    reply_to_timestamp: float = 0.0
     talking_to: str = "group"
     talking_to_name: str = "群聊"
     at_targets: list[tuple[str, str]] = field(default_factory=list)
@@ -265,6 +300,38 @@ class MessageRecord:
     image_count: int = 0
     has_gif: bool = False
     gif_count: int = 0
+
+
+def _is_reliable_reply_sender_id(value: Any) -> bool:
+    """引用组件的发送者 ID 只有非空、非占位值时才可用于身份归因。"""
+    normalized = _clean_one_line(value).strip().casefold()
+    return bool(normalized and normalized not in {"0", "none", "null", "unknown", "undefined"})
+
+
+def _apply_reply_reference(msg: MessageRecord, comp: Reply) -> None:
+    """从 Reply 组件保存可用于本轮引用指向分析的稳定元数据。"""
+    reply_sender_id = _clean_one_line(getattr(comp, "sender_id", "")).strip()
+    if _is_reliable_reply_sender_id(reply_sender_id):
+        msg.reply_to_id = reply_sender_id
+
+    reply_name = _clean_one_line(getattr(comp, "sender_nickname", "")).strip()
+    if reply_name:
+        msg.reply_to_name = reply_name
+
+    reply_message_id = _clean_one_line(getattr(comp, "id", "")).strip()
+    if reply_message_id and reply_message_id != "0":
+        msg.reply_to_message_id = reply_message_id
+
+    reply_content = _clean_one_line(getattr(comp, "message_str", "")).strip()
+    if reply_content:
+        msg.reply_to_content = reply_content[:500]
+
+    try:
+        reply_timestamp = float(getattr(comp, "time", 0) or 0)
+    except (TypeError, ValueError):
+        reply_timestamp = 0.0
+    if reply_timestamp > 0:
+        msg.reply_to_timestamp = reply_timestamp
 
 
 def _normalize_at_target(
@@ -1191,11 +1258,7 @@ class SceneAnalyzer:
             elif isinstance(comp, AtAll):
                 msg.at_all = True
             elif isinstance(comp, Reply):
-                if comp.sender_id:
-                    msg.reply_to_id = str(comp.sender_id)
-                reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
-                if reply_name:
-                    msg.reply_to_name = reply_name
+                _apply_reply_reference(msg, comp)
 
         return msg
 
@@ -1483,6 +1546,7 @@ class SceneGenerator:
         summary: str = "",
         *,
         identity_hint: str = "",
+        reply_direction_hint: str = "",
         speaker_identity_mode: str = SPEAKER_IDENTITY_PLATFORM_ID,
         speaker_attribution_guard: bool = True,
         speaker_attribution_template: str = DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE,
@@ -1540,6 +1604,14 @@ class SceneGenerator:
                 f'current_sender="{esc(current_speaker_label)}">'
                 f"{esc(attribution)}"
                 "</speaker_attribution>"
+            )
+
+        if reply_direction_hint:
+            parts.append(f"  {REPLY_DIRECTION_INJECTED_MARKER}")
+            parts.append(
+                '  <reply_direction source="scene_memory">'
+                f"{esc(_clean_one_line(reply_direction_hint))}"
+                "</reply_direction>"
             )
 
         # ===== 3. 关键行为指导（重点！）=====
@@ -1798,6 +1870,19 @@ class Main(star.Star):
                 DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE,
             )
             or DEFAULT_SPEAKER_ATTRIBUTION_TEMPLATE
+        )
+        self._reply_direction_hint_enabled = self._cfg_bool(
+            "reply_direction_hint", False
+        )
+        self._reply_direction_hint_template = str(
+            self._cfg(
+                "reply_direction_hint_template",
+                DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE,
+            )
+            or DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE
+        )
+        self._reply_direction_cleanup_internal_markers = self._cfg_bool(
+            "reply_direction_cleanup_internal_markers", True
         )
         self._dynamic_name_identity_hint_enabled = self._cfg_bool(
             "dynamic_name_identity_hint", True
@@ -2124,6 +2209,228 @@ class Main(star.Star):
 
         alias_text = _format_name_list(names[:3])
         return template.replace("{bot_called_names}", alias_text).strip()
+
+    @staticmethod
+    def _is_qq_official_event(event: AstrMessageEvent) -> bool:
+        """QQ 官方 Bot 的 Reply 缺少可靠发送者信息，不能做回复指向推断。"""
+        candidates: list[Any] = []
+        for getter_name in ("get_platform_name", "get_platform_id"):
+            getter = getattr(event, getter_name, None)
+            if not callable(getter):
+                continue
+            try:
+                candidates.append(getter())
+            except Exception:
+                continue
+
+        platform_meta = getattr(event, "platform_meta", None)
+        if platform_meta is not None:
+            candidates.extend(
+                [
+                    getattr(platform_meta, "name", ""),
+                    getattr(platform_meta, "id", ""),
+                ]
+            )
+
+        for value in candidates:
+            normalized = _clean_one_line(value).casefold().replace("-", "_")
+            if normalized in _QQ_OFFICIAL_PLATFORM_NAMES or normalized.startswith(
+                "qq_official_"
+            ):
+                return True
+        return False
+
+    @staticmethod
+    def _find_quoted_message(
+        current: MessageRecord,
+        history: list[MessageRecord] | deque[MessageRecord],
+    ) -> MessageRecord | None:
+        """按 Reply 消息 ID 查找引用原消息；命中不唯一时不使用。"""
+        reply_message_id = _clean_one_line(current.reply_to_message_id).strip()
+        if not reply_message_id:
+            return None
+        matches = [
+            msg
+            for msg in history
+            if _clean_one_line(msg.msg_id).strip() == reply_message_id
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _reply_contents_match(quoted_content: str, candidate_content: str) -> bool:
+        """比对引用组件原文和已记录 Bot 文本，允许安全的截断前缀匹配。"""
+        quoted = _clean_one_line(quoted_content).strip()
+        candidate = _clean_one_line(candidate_content).strip()
+        if not quoted or not candidate:
+            return False
+        if quoted == candidate:
+            return True
+        if min(len(quoted), len(candidate)) < 24:
+            return False
+        return quoted.startswith(candidate) or candidate.startswith(quoted)
+
+    def _resolve_quoted_bot_reply(
+        self,
+        current: MessageRecord,
+        history: list[MessageRecord] | deque[MessageRecord],
+        quoted_message: MessageRecord | None,
+    ) -> MessageRecord | None:
+        """只在引用来源可唯一确认时，定位被引用的 Bot 回复。"""
+        if quoted_message is not None and quoted_message.is_bot:
+            return quoted_message
+
+        bot_id = _clean_one_line(self._bot_id).strip()
+        if not bot_id or _clean_one_line(current.reply_to_id).strip() != bot_id:
+            return None
+
+        candidates = [msg for msg in history if msg.is_bot]
+        if not candidates:
+            return None
+
+        evidence_sets: list[set[str]] = []
+        if current.reply_to_timestamp > 0:
+            timestamp_matches = {
+                msg.msg_id
+                for msg in candidates
+                if abs(msg.timestamp - current.reply_to_timestamp) <= 3.0
+            }
+            if timestamp_matches:
+                evidence_sets.append(timestamp_matches)
+
+        if current.reply_to_content:
+            content_matches = {
+                msg.msg_id
+                for msg in candidates
+                if self._reply_contents_match(current.reply_to_content, msg.content)
+            }
+            if content_matches:
+                evidence_sets.append(content_matches)
+
+        if not evidence_sets:
+            return None
+
+        matched_ids = set.intersection(*evidence_sets)
+        if len(matched_ids) != 1:
+            return None
+        matched_id = next(iter(matched_ids))
+        return next((msg for msg in candidates if msg.msg_id == matched_id), None)
+
+    def _build_reply_direction_hint(
+        self,
+        event: AstrMessageEvent,
+        current: MessageRecord,
+        history: list[MessageRecord] | deque[MessageRecord],
+    ) -> str:
+        """为可靠的引用回复生成仅本轮有效的中文指向说明。"""
+        if not getattr(self, "_reply_direction_hint_enabled", False):
+            return ""
+        if self._is_qq_official_event(event):
+            return ""
+
+        quoted_message = self._find_quoted_message(current, history)
+        reply_sender_id = _clean_one_line(current.reply_to_id).strip()
+        if quoted_message is None and not _is_reliable_reply_sender_id(reply_sender_id):
+            return ""
+
+        bot_id = _clean_one_line(self._bot_id).strip()
+        if quoted_message is not None:
+            quoted_speaker = _speaker_identity_label(
+                quoted_message,
+                self._speaker_identity_mode,
+            )
+            quote_is_bot = quoted_message.is_bot
+        elif reply_sender_id == bot_id:
+            quoted_speaker = "你 [bot:self]"
+            quote_is_bot = True
+        else:
+            quoted_speaker = _addressee_identity_label(
+                reply_sender_id,
+                current.reply_to_name,
+                self._speaker_identity_mode,
+                bot_label="你",
+                group_label="群聊",
+            )
+            quote_is_bot = False
+
+        bot_reply_target_note = ""
+        if quote_is_bot:
+            quoted_bot_reply = self._resolve_quoted_bot_reply(
+                current,
+                history,
+                quoted_message,
+            )
+            if (
+                quoted_bot_reply is not None
+                and quoted_bot_reply.talking_to not in {"", "bot", "group"}
+            ):
+                target = _addressee_identity_label(
+                    quoted_bot_reply.talking_to,
+                    quoted_bot_reply.talking_to_name,
+                    self._speaker_identity_mode,
+                    bot_label="你",
+                    group_label="群聊",
+                )
+                bot_reply_target_note = (
+                    f"被引用的 Bot 回复原本是回复给 {target}，不是自动回复给当前发言人。"
+                )
+            else:
+                bot_reply_target_note = (
+                    "被引用的消息由 Bot 发送，但无法从当前引用安全确认它原本回复给谁；"
+                    "不要默认归属给当前发言人。"
+                )
+
+        template = _clean_one_line(
+            getattr(
+                self,
+                "_reply_direction_hint_template",
+                DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE,
+            )
+        ).strip() or DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE
+        return (
+            template.replace(
+                "{current_speaker}",
+                _speaker_identity_key(current, self._speaker_identity_mode),
+            )
+            .replace("{quoted_speaker}", quoted_speaker)
+            .replace("{quoted_bot_reply_target_note}", bot_reply_target_note)
+            .strip()
+        )
+
+    @staticmethod
+    def _strip_internal_scene_markers(value: Any) -> str:
+        """从请求副本或模型输出中剥离本插件的内部临时标记。"""
+        text = "" if value is None else str(value)
+        text = _INTERNAL_SCENE_BLOCK_RE.sub("", text)
+        text = _INTERNAL_REPLY_DIRECTION_BLOCK_RE.sub("", text)
+        return _INTERNAL_SCENE_MARKER_RE.sub("", text)
+
+    @classmethod
+    def _clean_request_internal_markers(cls, req: ProviderRequest) -> None:
+        """仅清理当前 ProviderRequest 副本，不修改持久化会话历史。"""
+        system_prompt = getattr(req, "system_prompt", None)
+        if isinstance(system_prompt, str):
+            req.system_prompt = cls._strip_internal_scene_markers(system_prompt)
+
+        contexts = getattr(req, "contexts", None)
+        if isinstance(contexts, list):
+            for context in contexts:
+                if not isinstance(context, dict):
+                    continue
+                content = context.get("content")
+                if isinstance(content, str):
+                    context["content"] = cls._strip_internal_scene_markers(content)
+                elif isinstance(content, list):
+                    for item in content:
+                        if isinstance(item, dict) and isinstance(item.get("text"), str):
+                            item["text"] = cls._strip_internal_scene_markers(item["text"])
+
+        extra_parts = getattr(req, "extra_user_content_parts", None)
+        if isinstance(extra_parts, list):
+            for part in extra_parts:
+                if isinstance(part, TextPart) and isinstance(getattr(part, "text", None), str):
+                    part.text = cls._strip_internal_scene_markers(part.text)
+                elif isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = cls._strip_internal_scene_markers(part["text"])
 
     def _inject_scene(self, req: ProviderRequest, scene: str) -> None:
         """安全注入场景描述到请求（v3.0.0: 防止重复注入 + 兼容处理）"""
@@ -2617,11 +2924,7 @@ class Main(star.Star):
             elif isinstance(comp, AtAll):
                 msg.at_all = True
             elif isinstance(comp, Reply):
-                if comp.sender_id:
-                    msg.reply_to_id = str(comp.sender_id)
-                reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
-                if reply_name:
-                    msg.reply_to_name = reply_name
+                _apply_reply_reference(msg, comp)
 
         return msg
 
@@ -2842,6 +3145,11 @@ class Main(star.Star):
 
             participants = _unique_speaker_labels(flow, self._speaker_identity_mode)
             identity_hint = self._build_identity_hint(current, dynamic_card_aliases)
+            reply_direction_hint = self._build_reply_direction_hint(
+                event,
+                current,
+                flow_source,
+            )
 
             scene = self._scene_generator.generate(
                 trigger_type=trigger_type,
@@ -2852,6 +3160,7 @@ class Main(star.Star):
                 participants=participants,
                 summary=snapshot.summary,
                 identity_hint=identity_hint,
+                reply_direction_hint=reply_direction_hint,
                 speaker_identity_mode=self._speaker_identity_mode,
                 speaker_attribution_guard=self._speaker_attribution_guard_enabled,
                 speaker_attribution_template=self._speaker_attribution_template,
@@ -2863,6 +3172,11 @@ class Main(star.Star):
             )
 
             # 注入场景描述到请求（v3.0.0: 防止重复注入）
+            if (
+                self._reply_direction_hint_enabled
+                and self._reply_direction_cleanup_internal_markers
+            ):
+                self._clean_request_internal_markers(req)
             self._inject_scene(req, scene)
 
             self._stats.scenes_injected += 1
@@ -2893,6 +3207,16 @@ class Main(star.Star):
         """记录 Bot 回复"""
         if not self._should_process(event):
             return
+
+        if (
+            getattr(self, "_reply_direction_hint_enabled", False)
+            and getattr(self, "_reply_direction_cleanup_internal_markers", True)
+            and resp.completion_text
+        ):
+            cleaned_completion = self._strip_internal_scene_markers(
+                resp.completion_text
+            )
+            resp.completion_text = cleaned_completion if cleaned_completion.strip() else ""
 
         if not resp.completion_text:
             return

@@ -107,6 +107,30 @@
       "speaker_attribution_guard": true
     }
   },
+  "reply_direction_hint": {
+    "description": "优化引用回复指向",
+    "type": "bool",
+    "default": false,
+    "hint": "在本轮请求中临时说明当前发言人、被引用消息发送者，以及可唯一确认时 Bot 被引用回复原本回复给谁。QQ 官方 Bot 的引用信息不可靠，会自动跳过。"
+  },
+  "reply_direction_hint_template": {
+    "description": "引用回复指向提示词",
+    "type": "text",
+    "default": "这是引用回复的临时指向说明：当前发言人是 {current_speaker}；被引用消息的发送者是 {quoted_speaker}。{quoted_bot_reply_target_note}仅按这些身份标签解释引用关系；除非身份标签一致，否则不要把被引用消息、Bot 回复对象或其历史经历归属给当前发言人。",
+    "hint": "可用占位符: {current_speaker}、{quoted_speaker}、{quoted_bot_reply_target_note}。留空时使用内置提示词。",
+    "condition": {
+      "reply_direction_hint": true
+    }
+  },
+  "reply_direction_cleanup_internal_markers": {
+    "description": "清理引用回复指向内部标记",
+    "type": "bool",
+    "default": true,
+    "hint": "仅在当前模型请求副本中清理旧标记，并移除模型误回显的内部标记；不会批量迁移历史，也不会修改正常聊天内容。",
+    "condition": {
+      "reply_direction_hint": true
+    }
+  },
   "strict_mode": {
     "description": "主动或未知触发时严格避免误判为在和 Bot 说话",
     "type": "bool",

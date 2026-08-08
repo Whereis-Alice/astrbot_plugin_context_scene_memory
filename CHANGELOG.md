@@ -13,6 +13,22 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.4.0
+
+本版本新增可选的引用回复指向优化，默认关闭，不改变原有聊天发送内容。
+
+### 新增
+
+- 新增 `reply_direction_hint`。开启后会在当前 LLM 请求中临时注入中文说明，标明当前发言人、被引用消息发送者，以及能够唯一确认时被引用 Bot 回复原本回复给谁。
+- 新增 `reply_direction_hint_template`，支持 `{current_speaker}`、`{quoted_speaker}` 和 `{quoted_bot_reply_target_note}` 占位符。
+- 新增 `reply_direction_cleanup_internal_markers`，默认开启，仅清理本轮请求副本中的旧内部场景标记，并移除模型误回显的内部标记。
+
+### 安全与兼容性
+
+- QQ 官方 Bot 的 Reply 组件缺少可靠的被引用消息发送者 ID，因此引用回复指向优化会自动跳过该平台。
+- 对被引用 Bot 回复的原始对象，只有引用消息 ID、引用原文或引用时间能唯一定位到本插件已记录的 Bot 回复时才会写入；信息不足或存在歧义时明确标为未知，不会用“最近一条 Bot 回复”进行猜测。
+- 临时说明通过 `TextPart.mark_as_temp()` 参与本轮请求，不写入会话历史；不会批量迁移旧历史，也不会改写正常聊天内容。
+
 ## v3.3.1
 
 本版本继续收紧同名用户场景中的归因链路，补足“Bot 上一句在回复谁”的精确标识。

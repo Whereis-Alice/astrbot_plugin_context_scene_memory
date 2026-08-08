@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.3.1`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
+当前分叉版为 `v3.4.0`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
 
 ## 这个插件做什么
 
@@ -12,6 +12,7 @@
 - 推断“谁在和谁说话”，在 LLM 请求前注入结构化场景提示。
 - 用稳定平台 ID 标记消息发送者和明确接收对象，避免同名、改名或动态昵称成员之间串人。
 - 跟踪 Bot 最近回复对象、最近发言时间，并保留其精确身份标签，减少主动回复时的误判。
+- 可选注入引用回复指向，说明当前发言人、被引用消息发送者，以及能唯一确认时的 Bot 原始回复对象。
 - 跟随 `/reset`、`/new` 和系统会话清理标记清空插件历史，避免旧上下文在新会话中复活。
 - 单独注入最近图片和语音转写上下文，避免普通对话窗口把它们挤掉。
 - 可选图像转述和历史摘要压缩，适合更长或更多媒体的群聊。
@@ -55,6 +56,7 @@ provider_settings:
 | `show_recent_images_allow_gif` | `false` | 默认过滤 GIF，避免部分模型不支持 `image/gif` |
 | `voice_context_window` | `50` | 单独扫描最近语音转写 |
 | `strict_mode` | `false` | 主动/未知触发时更保守，降低 Bot 误把群聊当成对自己说话的概率 |
+| `reply_direction_hint` | `false` | 可选优化引用回复指向；QQ 官方 Bot 自动跳过 |
 | `history_compress_strategy` | `off` | 上下文真的太长时再改为 `llm_summary` |
 
 会话清理不需要额外配置。本插件不注册 `/reset` 或 `/new` 指令，只监听 AstrBot 已识别的命令和清理标记，因此不会抢占其他插件的命令处理；安装了 `astrbot_plugin_cmdmask` 时，也会按它写入的真实命令目标清理上下文。
@@ -92,6 +94,18 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `speaker_attribution_template` | 归因保护提示词，可用 `{current_speaker}`，其值是可直接比较的身份键，如 `user:<QQ号>`。留空时使用内置默认值。 |
 
 场景中的当前消息会带有 `speaker="user:<平台ID>"`。历史对话、图片和语音也会把发送者写入同一个 `speaker` 字段，并在 `talking_to` 中标出明确接收对象的身份标签；因此 Bot 的上一句是回复给谁，也不会只靠昵称判断。这样即使两个人昵称一样，模型仍能区分是谁说过哪句话、哪一句是在回复谁。身份标签用于上下文归因，不是权限认证。
+
+### 引用回复指向优化
+
+| 配置项 | 说明 |
+| --- | --- |
+| `reply_direction_hint` | 默认 `false`。开启后，引用回复会在当前模型请求中临时说明当前发言人和被引用消息发送者。 |
+| `reply_direction_hint_template` | 提示词模板，可用 `{current_speaker}`、`{quoted_speaker}`、`{quoted_bot_reply_target_note}`。 |
+| `reply_direction_cleanup_internal_markers` | 默认 `true`。只清理当前请求副本中的旧内部场景标记，并移除模型误回显的内部标记。 |
+
+引用的是 Bot 消息时，插件只会在引用消息 ID、引用原文或引用时间能唯一匹配已记录 Bot 回复时，说明这条 Bot 回复原本是回复给谁。不能唯一确认时会明确提示未知，绝不会把“最近一条 Bot 回复”的对象硬套给当前引用。QQ 官方 Bot 的 `Reply` 组件不提供可靠的被引用消息发送者信息，因此该优化会自动跳过。
+
+所有说明均以临时 `TextPart` 注入，仅参与当前请求；真实发送到聊天平台的消息不会改变。旧会话不做批量迁移，内部标记只在当前请求副本中清理。
 
 ### 动态群名片
 

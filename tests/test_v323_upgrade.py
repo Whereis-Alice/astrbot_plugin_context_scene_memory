@@ -1,4 +1,4 @@
-"""v3.3.0 的回归测试，不依赖已安装的 AstrBot。"""
+"""分叉版上下文与引用归因的回归测试，不依赖已安装的 AstrBot。"""
 
 from __future__ import annotations
 
@@ -74,8 +74,19 @@ def _install_astrbot_stubs() -> None:
         pass
 
     class Reply:
-        def __init__(self, sender_id: str = ""):
+        def __init__(
+            self,
+            sender_id: str = "",
+            sender_nickname: str = "",
+            id: str = "",
+            message_str: str = "",
+            time: int = 0,
+        ):
             self.sender_id = sender_id
+            self.sender_nickname = sender_nickname
+            self.id = id
+            self.message_str = message_str
+            self.time = time
 
     class Provider:
         pass
@@ -466,6 +477,195 @@ class SpeakerAttributionTests(unittest.TestCase):
         self.assertEqual(recent[2]["speaker"], "同名用户 [user:20002]")
         self.assertIn("同名用户 [user:10001]", formatted)
         self.assertIn("同名用户 [user:20002]", formatted)
+
+
+class ReplyDirectionHintTests(unittest.TestCase):
+    @staticmethod
+    def _main() -> object:
+        instance = object.__new__(plugin.Main)
+        instance._bot_id = "bot"
+        instance._speaker_identity_mode = plugin.SPEAKER_IDENTITY_PLATFORM_ID
+        instance._reply_direction_hint_enabled = True
+        instance._reply_direction_hint_template = (
+            plugin.DEFAULT_REPLY_DIRECTION_HINT_TEMPLATE
+        )
+        return instance
+
+    @staticmethod
+    def _event(platform_name: str) -> object:
+        return SimpleNamespace(
+            get_platform_name=lambda: platform_name,
+            get_platform_id=lambda: "instance",
+        )
+
+    @staticmethod
+    def _message(
+        msg_id: str,
+        sender_id: str,
+        sender_name: str,
+        content: str,
+        **kwargs,
+    ):
+        timestamp = kwargs.pop("timestamp", 100)
+        return plugin.MessageRecord(
+            msg_id=msg_id,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            content=content,
+            timestamp=timestamp,
+            **kwargs,
+        )
+
+    def test_reply_metadata_is_preserved_from_reply_component(self):
+        record = self._message("current", "20002", "当前用户", "引用回复")
+        reply = plugin.Reply(
+            sender_id="10001",
+            sender_nickname="被引用用户",
+            id="quoted-message-id",
+            message_str="被引用原文",
+            time=123,
+        )
+
+        plugin._apply_reply_reference(record, reply)
+
+        self.assertEqual(record.reply_to_id, "10001")
+        self.assertEqual(record.reply_to_name, "被引用用户")
+        self.assertEqual(record.reply_to_message_id, "quoted-message-id")
+        self.assertEqual(record.reply_to_content, "被引用原文")
+        self.assertEqual(record.reply_to_timestamp, 123)
+
+    def test_reply_hint_identifies_bot_reply_target_and_stays_temporary(self):
+        instance = self._main()
+        bot_reply = self._message(
+            "bot-message-id",
+            "bot",
+            "[你]",
+            "这是给第一位同名用户的回答",
+            timestamp=300,
+            is_bot=True,
+            talking_to="10001",
+            talking_to_name="同名用户",
+        )
+        current = self._message(
+            "current",
+            "20002",
+            "同名用户",
+            "我引用这条回复继续问",
+            reply_to_id="bot",
+            reply_to_name="[你]",
+            reply_to_message_id="bot-message-id",
+            reply_to_content="这是给第一位同名用户的回答",
+            reply_to_timestamp=300,
+        )
+
+        hint = instance._build_reply_direction_hint(
+            self._event("aiocqhttp"),
+            current,
+            [bot_reply, current],
+        )
+        scene = plugin.SceneGenerator().generate(
+            trigger_type=plugin.TRIGGER_REPLY,
+            trigger_desc="当前用户引用回复 Bot",
+            current=current,
+            flow=[bot_reply, current],
+            bot_status={},
+            participants=[],
+            reply_direction_hint=hint,
+            speaker_identity_mode=plugin.SPEAKER_IDENTITY_PLATFORM_ID,
+        )
+
+        self.assertIn("当前发言人是 user:20002", hint)
+        self.assertIn("你 [bot:self]", hint)
+        self.assertIn("同名用户 [user:10001]", hint)
+        self.assertIn(plugin.REPLY_DIRECTION_INJECTED_MARKER, scene)
+        self.assertIn('<reply_direction source="scene_memory">', scene)
+
+    def test_reply_hint_skips_qq_official_and_ambiguous_bot_reply_target(self):
+        instance = self._main()
+        first_reply = self._message(
+            "bot-1",
+            "bot",
+            "[你]",
+            "相同回复",
+            timestamp=100,
+            is_bot=True,
+            talking_to="10001",
+            talking_to_name="同名用户",
+        )
+        second_reply = self._message(
+            "bot-2",
+            "bot",
+            "[你]",
+            "相同回复",
+            timestamp=200,
+            is_bot=True,
+            talking_to="30003",
+            talking_to_name="同名用户",
+        )
+        current = self._message(
+            "current",
+            "20002",
+            "当前用户",
+            "引用 Bot 回复",
+            reply_to_id="bot",
+            reply_to_content="相同回复",
+        )
+
+        ambiguous_hint = instance._build_reply_direction_hint(
+            self._event("aiocqhttp"),
+            current,
+            [first_reply, second_reply, current],
+        )
+
+        self.assertIn("无法从当前引用安全确认", ambiguous_hint)
+        self.assertNotIn("user:10001", ambiguous_hint)
+        self.assertNotIn("user:30003", ambiguous_hint)
+        self.assertEqual(
+            instance._build_reply_direction_hint(
+                self._event("qq_official"),
+                current,
+                [first_reply, second_reply, current],
+            ),
+            "",
+        )
+
+    def test_internal_markers_are_removed_from_request_copies(self):
+        old_scene = (
+            f"{plugin.ExtraKeys.SCENE_INJECTED_MARKER}\n"
+            "<conversation_scene>旧场景</conversation_scene>"
+        )
+        old_reply_hint = (
+            f"{plugin.REPLY_DIRECTION_INJECTED_MARKER}\n"
+            '<reply_direction source="scene_memory">旧引用说明</reply_direction>'
+        )
+        dirty = f"保留前缀 {old_scene} 中间 {old_reply_hint} 保留后缀"
+        text_part = plugin.TextPart(text=dirty)
+        request = SimpleNamespace(
+            system_prompt=dirty,
+            contexts=[
+                {"role": "assistant", "content": dirty},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": dirty}],
+                },
+            ],
+            extra_user_content_parts=[text_part],
+        )
+
+        plugin.Main._clean_request_internal_markers(request)
+
+        for cleaned in (
+            request.system_prompt,
+            request.contexts[0]["content"],
+            request.contexts[1]["content"][0]["text"],
+            text_part.text,
+            plugin.Main._strip_internal_scene_markers(dirty),
+        ):
+            self.assertIn("保留前缀", cleaned)
+            self.assertIn("保留后缀", cleaned)
+            self.assertNotIn("scene_memory_", cleaned)
+            self.assertNotIn("旧场景", cleaned)
+            self.assertNotIn("旧引用说明", cleaned)
 
 
 class InferenceSafetyTests(unittest.TestCase):

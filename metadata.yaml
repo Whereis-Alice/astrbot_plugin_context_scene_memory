@@ -19,12 +19,13 @@ help: |
   - 兼容 QQ/NapCat 等平台传入的 base64 data URI 图片，避免图像转述路径过长报错
   - 可选严格模式：主动/未知触发时减少把群聊误判为对 Bot 说话
   - 默认使用稳定平台用户 ID（QQ 平台即 QQ 号）标注发送者和接收对象，避免将其他成员的话或 Bot 回复串给当前用户
+  - 可选优化引用回复指向：临时说明引用来源与 Bot 原始回复对象，QQ 官方 Bot 自动跳过
   - 可配置用户发言归因保护提示词，并支持切换为脱敏身份标签
   - 可选动态群名片身份提示，缓解“@到动态昵称却被模型当成另一个AI”的误判
   - 适配 astrbot_plugin_dynamic_card_plus，把当前群名片识别为 Bot 自己
 
   更详细的来源说明、配置说明和变更记录请查看 README.md 与 CHANGELOG.md。
-version: 3.3.1
+version: 3.4.0
 author: Huli3（fork 自 木有知）
 repo: https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory
 astrbot_version: ">=4.24.0"
