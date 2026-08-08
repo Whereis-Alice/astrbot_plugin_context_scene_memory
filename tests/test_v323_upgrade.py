@@ -430,14 +430,27 @@ class SpeakerAttributionTests(unittest.TestCase):
 
     def test_summary_and_public_context_keep_speaker_identity(self):
         first = self._message("first", "10001", "另一位用户的观点")
+        bot_reply = plugin.MessageRecord(
+            msg_id="bot",
+            sender_id="bot",
+            sender_name="[你]",
+            content="这是给第一位用户的回答",
+            timestamp=2,
+            is_bot=True,
+            talking_to="10001",
+            talking_to_name="同名用户",
+        )
         current = self._message("current", "20002", "当前用户的观点")
         instance = object.__new__(plugin.Main)
         instance._speaker_identity_mode = plugin.SPEAKER_IDENTITY_PLATFORM_ID
         instance._sessions = plugin.SessionManager(max_messages=10, max_sessions=10)
         instance._sessions.add_message("umo:identity", first)
+        instance._sessions.add_message("umo:identity", bot_reply)
         instance._sessions.add_message("umo:identity", current)
 
-        summary_input = instance._build_summary_input([first, current], max_chars=1000)
+        summary_input = instance._build_summary_input(
+            [first, bot_reply, current], max_chars=1000
+        )
         recent = instance.get_recent_messages("umo:identity")
         formatted = instance.get_formatted_context("umo:identity")
 
@@ -445,7 +458,12 @@ class SpeakerAttributionTests(unittest.TestCase):
         self.assertIn("同名用户 [user:20002]", summary_input)
         self.assertEqual(recent[0]["sender_id"], "10001")
         self.assertEqual(recent[0]["speaker_id"], "user:10001")
-        self.assertEqual(recent[1]["speaker"], "同名用户 [user:20002]")
+        self.assertEqual(recent[1]["talking_to_id"], "10001")
+        self.assertEqual(
+            recent[1]["talking_to_speaker"],
+            "同名用户 [user:10001]",
+        )
+        self.assertEqual(recent[2]["speaker"], "同名用户 [user:20002]")
         self.assertIn("同名用户 [user:10001]", formatted)
         self.assertIn("同名用户 [user:20002]", formatted)
 
