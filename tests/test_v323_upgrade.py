@@ -330,6 +330,116 @@ class ImageCaptionDataUriTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class ImageEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _event(
+        components: list[object],
+        *,
+        message_str: str = "",
+        outline: str = "",
+    ) -> object:
+        return SimpleNamespace(
+            message_str=message_str,
+            message_obj=SimpleNamespace(message_id="media-test", message_str=message_str),
+            unified_msg_origin="umo:media-test",
+            get_sender_id=lambda: "user",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: components,
+            get_message_outline=lambda: outline,
+            get_message_str=lambda: message_str,
+            get_extra=lambda _key, default=None: default,
+        )
+
+    @staticmethod
+    def _main() -> object:
+        instance = object.__new__(plugin.Main)
+        instance._analyzer = SimpleNamespace(bot_id="bot")
+        instance._image_caption_enabled = False
+        instance._show_recent_images_allow_gif = False
+        instance._record_structural_messages = True
+        return instance
+
+    async def test_plain_image_placeholder_is_not_media_evidence(self):
+        instance = self._main()
+        record = await instance._extract_message_with_caption(
+            self._event([plugin.Plain("[图片] 只是文字")], message_str="[图片] 只是文字")
+        )
+
+        self.assertFalse(record.has_image)
+        self.assertEqual(record.image_count, 0)
+
+    async def test_outline_only_placeholder_is_not_media_evidence(self):
+        instance = self._main()
+        record = await instance._extract_message_with_caption(
+            self._event([], outline="[图片]")
+        )
+
+        self.assertFalse(record.has_image)
+        self.assertEqual(record.image_count, 0)
+
+    async def test_scene_marks_literal_image_text_and_keeps_it_out_of_images(self):
+        literal = plugin.MessageRecord(
+            msg_id="literal",
+            sender_id="user",
+            sender_name="用户",
+            content="[图片] 只是普通文字",
+            timestamp=1,
+        )
+        current = plugin.MessageRecord(
+            msg_id="current",
+            sender_id="other",
+            sender_name="其他人",
+            content="我看到了",
+            timestamp=2,
+        )
+
+        scene = plugin.SceneGenerator().generate(
+            trigger_type=plugin.TRIGGER_AT,
+            trigger_desc="当前用户明确呼叫你",
+            current=current,
+            flow=[literal, current],
+            bot_status={},
+            participants=[],
+            image_flow=[literal],
+        )
+
+        self.assertIn('image_token_is_text="true"', scene)
+        self.assertIn("不要据此描述、分析、搜索或声称看到了图片", scene)
+        self.assertNotIn("<recent_images>", scene)
+
+    async def test_real_image_component_still_enters_recent_images(self):
+        image = plugin.MessageRecord(
+            msg_id="image",
+            sender_id="user",
+            sender_name="用户",
+            content="[图片]",
+            timestamp=1,
+            has_image=True,
+            image_count=1,
+        )
+        current = plugin.MessageRecord(
+            msg_id="current",
+            sender_id="other",
+            sender_name="其他人",
+            content="我看到了",
+            timestamp=2,
+        )
+
+        scene = plugin.SceneGenerator().generate(
+            trigger_type=plugin.TRIGGER_AT,
+            trigger_desc="当前用户明确呼叫你",
+            current=current,
+            flow=[image, current],
+            bot_status={},
+            participants=[],
+            image_flow=[image],
+        )
+
+        self.assertIn("<recent_images>", scene)
+        self.assertIn('media="image"', scene)
+        self.assertNotIn('image_token_is_text="true"', scene)
+
+
 class SpeakerAttributionTests(unittest.TestCase):
     @staticmethod
     def _message(

@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.4.0 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.4.1 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,10 @@ AstrBot 上下文场景记忆增强插件 v3.4.0 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.4.1 分叉版更新:
+- [FIX] 只有 AstrBot Image 组件才会进入最近图片上下文；纯文本中的 [图片] 不再被误认成真实图片
+- [SAFE] 对纯文本图片占位增加明确标记，禁止模型据此描述、分析、搜索或声称看到了图片
 
 v3.4.0 分叉版更新:
 - [NEW] 新增默认关闭的 reply_direction_hint，为可靠的引用回复临时注入当前发言人、引用来源和 Bot 原始回复对象说明
@@ -93,7 +97,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.3.0
+Version: 3.4.1
 """
 
 from __future__ import annotations
@@ -555,9 +559,20 @@ def _looks_like_voice_transcript(text: str) -> bool:
 
 
 def _looks_like_image_outline(text: str) -> bool:
-    """识别平台概要中的图片占位，兼容不同适配器的文案。"""
+    """识别平台概要中的图片占位，仅用于判断无组件事件是否值得记录。"""
     lowered = text.lower()
     return any(token in lowered for token in ("[图片", "图片", "照片", "[image", "image", "photo"))
+
+
+_IMAGE_PLACEHOLDER_TEXT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\[\s*(?:图片|image)(?:\s*[:：][^\]]*)?\]",
+    re.IGNORECASE,
+)
+
+
+def _contains_image_placeholder_text(value: Any) -> bool:
+    """识别消息正文里的字面图片占位，不能将其当作媒体组件。"""
+    return bool(_IMAGE_PLACEHOLDER_TEXT_RE.search(_clean_one_line(value)))
 
 
 _GIF_BASE64_PREFIXES: Final[tuple[str, str]] = ("R0lGODlh", "R0lGODdh")
@@ -1207,7 +1222,6 @@ class SceneAnalyzer:
         voice_transcript = _event_voice_transcript(event)
         image_count = 0
         gif_count = 0
-        has_plain_text = False
 
         # 提取消息内容，拼接所有文本和图片描述
         content = voice_transcript or event.message_str or ""
@@ -1216,7 +1230,6 @@ class SceneAnalyzer:
             parts: list[str] = []
             for comp in event.get_messages():
                 if isinstance(comp, Plain) and comp.text:
-                    has_plain_text = True
                     parts.append(comp.text)
                 elif isinstance(comp, Image):
                     image_count += 1
@@ -1225,13 +1238,13 @@ class SceneAnalyzer:
                     parts.append("[图片]")
             content = "".join(parts) if parts else (message_outline or "[消息]")
         else:
-            has_plain_text = True
             for comp in event.get_messages():
                 if isinstance(comp, Image):
                     image_count += 1
                     if _image_ref_looks_like_gif(self._image_ref_from_component(comp)):
                         gif_count += 1
-        has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
+        # 平台概要或用户手打的“[图片]”没有可靠媒体证据，不能视为真实图片。
+        has_image = image_count > 0
 
         msg = MessageRecord(
             msg_id=str(event.message_obj.message_id),
@@ -1242,7 +1255,7 @@ class SceneAnalyzer:
             is_bot=(sender_id == self._bot_id),
             message_outline=message_outline,
             has_image=has_image,
-            image_count=max(image_count, 1 if has_image else 0),
+            image_count=image_count,
             has_gif=gif_count > 0,
             gif_count=gif_count,
         )
@@ -1563,6 +1576,17 @@ class SceneGenerator:
         speaker_identity_mode = _normalize_speaker_identity_mode(speaker_identity_mode)
         current_speaker_key = _speaker_identity_key(current, speaker_identity_mode)
         current_speaker_label = _speaker_identity_label(current, speaker_identity_mode)
+        current_has_literal_image_token = (
+            not current.has_image
+            and _contains_image_placeholder_text(current.content)
+        )
+        current_media_attr = ' media="image"' if current.has_image else ""
+        current_literal_image_attr = (
+            ' image_token_is_text="true"'
+            if current_has_literal_image_token
+            else ""
+        )
+        literal_image_token_seen = current_has_literal_image_token
 
         # ===== 1. 触发类型 =====
         parts.append(f'  <trigger type="{trigger_type}">{esc(trigger_desc)}</trigger>')
@@ -1590,7 +1614,9 @@ class SceneGenerator:
             f'  <current_message speaker="{esc(current_speaker_key)}">'
             f'\n    <sender>{esc(current_speaker_label)}</sender>'
             f'\n    <talking_to>{esc(addressee_desc)}</talking_to>'
-            f'\n    <content>{esc(current.content[:80])}</content>'
+            f'\n    <content'
+            f'{current_media_attr}{current_literal_image_attr}'
+            f'>{esc(current.content[:80])}</content>'
             f'\n  </current_message>'
         )
 
@@ -1643,20 +1669,42 @@ class SceneGenerator:
                 sender_key = _speaker_identity_key(m, speaker_identity_mode)
                 sender = _speaker_identity_label(m, speaker_identity_mode)
                 preview = m.content[:20] + ("..." if len(m.content) > 20 else "")
+                has_literal_image_token = (
+                    not m.has_image
+                    and _contains_image_placeholder_text(m.content)
+                )
+                literal_image_token_seen = (
+                    literal_image_token_seen or has_literal_image_token
+                )
+                media_attr = ' media="image"' if m.has_image else ""
+                literal_image_attr = (
+                    ' image_token_is_text="true"'
+                    if has_literal_image_token
+                    else ""
+                )
                 flow_lines.append(
                     f'    <m speaker="{esc(sender_key)}" sender="{esc(sender)}" '
-                    f'talking_to="{esc(to_name)}">{esc(preview)}</m>'
+                    f'talking_to="{esc(to_name)}"'
+                    f'{media_attr}{literal_image_attr}'
+                    f'>{esc(preview)}</m>'
                 )
             parts.append('  <recent_flow>')
             parts.extend(flow_lines)
             parts.append('  </recent_flow>')
+
+        if literal_image_token_seen:
+            parts.append(
+                '  <media_safety>标有 image_token_is_text="true" 的内容里的“[图片]”'
+                '只是普通文字，并不代表存在图片附件；不要据此描述、分析、搜索或声称看到了图片。'
+                '</media_safety>'
+            )
 
         if show_recent_images:
             image_lines: list[str] = []
             image_source = image_flow if image_flow is not None else flow
             for m in image_source:
                 content = m.content or ""
-                if not m.has_image and "[图片" not in content:
+                if not m.has_image:
                     continue
                 visible_image_count = max(m.image_count - m.gif_count, 0)
                 if m.has_gif and not show_recent_gifs and visible_image_count <= 0:
@@ -2850,16 +2898,13 @@ class Main(star.Star):
         voice_transcript = _event_voice_transcript(event)
         image_count = 0
         gif_count = 0
-        has_plain_text = False
 
         if voice_transcript:
             parts.append(voice_transcript)
-            has_plain_text = True
 
         # 提取消息内容
         for comp in event.get_messages():
             if isinstance(comp, Plain) and comp.text and not voice_transcript:
-                has_plain_text = True
                 parts.append(comp.text)
             elif isinstance(comp, Image):
                 image_count += 1
@@ -2893,10 +2938,9 @@ class Main(star.Star):
                     reply_name = str(getattr(comp, "sender_nickname", "") or "").strip()
                     parts.append(f"[回复 {reply_name}]" if reply_name else "[回复]")
 
-        has_image = image_count > 0 or (not has_plain_text and _looks_like_image_outline(message_outline))
+        # 只有真实 Image 组件才是可靠的图片证据；概要占位按普通文本处理。
+        has_image = image_count > 0
         content = "".join(parts) if parts else (message_outline or "[消息]")
-        if has_image and image_count == 0 and "[图片" not in content:
-            content = f"[图片] {content}".strip()
 
         msg = MessageRecord(
             msg_id=str(event.message_obj.message_id),
@@ -2907,7 +2951,7 @@ class Main(star.Star):
             is_bot=(sender_id == self._analyzer.bot_id),
             message_outline=message_outline,
             has_image=has_image,
-            image_count=max(image_count, 1 if has_image else 0),
+            image_count=image_count,
             has_gif=gif_count > 0,
             gif_count=gif_count,
         )

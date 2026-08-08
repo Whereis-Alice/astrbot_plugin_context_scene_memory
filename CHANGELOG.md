@@ -13,6 +13,14 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.4.1
+
+### 修复
+
+- 只有 AstrBot `Image` 组件才会进入 `<recent_images>`；纯文本 `[图片]`、`[图片: ...]` 和缺少媒体组件的平台概要不再被误判为真实图片。
+- 场景提示会为这类字面图片标记添加 `image_token_is_text="true"` 与安全说明，要求模型不要据此描述、分析、搜索或声称看到了图片。
+- 保留真实图片、图像转述和 GIF 过滤行为；本修复不改变聊天平台实际收到的消息内容。
+
 ## v3.4.0
 
 本版本新增可选的引用回复指向优化，默认关闭，不改变原有聊天发送内容。

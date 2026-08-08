@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.4.0`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
+当前分叉版为 `v3.4.1`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
 
 ## 这个插件做什么
 
@@ -132,7 +132,7 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 | `image_caption_timeout` | 图像转述超时时间 |
 | `voice_context_window` | 从最近 N 条消息里提取语音转写，`0` 表示关闭 |
 
-图片上下文会以 `<recent_images>` 注入；语音转写会以 `<recent_voice_transcripts>` 注入。未开启图像转述时，图片会使用 AstrBot 消息概要或 `[图片]` 占位。启用图像转述后，QQ/NapCat 等平台传入的 `data:image/...;base64,...` 图片会在本次视觉调用内转换为临时本地文件，避免超长 data URI 被部分 Provider 误当成文件名；临时文件在调用结束后会自动删除。
+图片上下文会以 `<recent_images>` 注入；语音转写会以 `<recent_voice_transcripts>` 注入。只有 AstrBot 事件中的真实 `Image` 组件才会进入图片上下文。用户手打的 `[图片]`、`[图片: ...]` 和没有 `Image` 组件支撑的平台概要会按普通文本保留，并在场景中明确标注，模型不得据此描述、分析、搜索或声称看到了图片。未开启图像转述时，真实图片会使用 `[图片]` 占位。启用图像转述后，QQ/NapCat 等平台传入的 `data:image/...;base64,...` 图片会在本次视觉调用内转换为临时本地文件，避免超长 data URI 被部分 Provider 误当成文件名；临时文件在调用结束后会自动删除。
 
 ### 历史压缩
 
