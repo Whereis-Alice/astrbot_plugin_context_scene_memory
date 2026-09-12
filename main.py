@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.4.1 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.5.0 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -19,6 +19,13 @@ AstrBot 上下文场景记忆增强插件 v3.4.1 (Context Scene Memory)
 v3.4.1 分叉版更新:
 - [FIX] 只有 AstrBot Image 组件才会进入最近图片上下文；纯文本中的 [图片] 不再被误认成真实图片
 - [SAFE] 对纯文本图片占位增加明确标记，禁止模型据此描述、分析、搜索或声称看到了图片
+
+v3.5.0 分叉版更新:
+- [FIX] @全体成员组件优先于 @ 组件解析，兼容 AtAll 继承 At 的平台实现
+- [FIX] @all 也会按 @全体处理；消息撤回清理新增异步公共 API
+- [FIX] 图像转述、历史压缩、场景注入和会话清理不再吞掉 asyncio.CancelledError
+- [FIX] 图像转述缓存增加 1 小时 TTL，避免 CDN 链接过期后复用旧描述
+- [CHANGE] Bot 回复后的短确认推断窗口收紧到 20 秒，并移除低置信度的快速连续对话推断
 
 v3.4.0 分叉版更新:
 - [NEW] 新增默认关闭的 reply_direction_hint，为可靠的引用回复临时注入当前发言人、引用来源和 Bot 原始回复对象说明
@@ -97,7 +104,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.4.1
+Version: 3.5.0
 """
 
 from __future__ import annotations
@@ -197,6 +204,7 @@ DEFAULT_REPLY_STARTERS: Final = frozenset({
 
 # 单张 data URI 图片的解码上限，避免异常消息占用过多内存和临时磁盘空间。
 IMAGE_CAPTION_DATA_URI_MAX_BYTES: Final = 50 * 1024 * 1024
+IMAGE_CAPTION_CACHE_TTL_SECONDS: Final = 3600.0
 _DATA_URI_IMAGE_SUFFIXES: Final[dict[str, str]] = {
     "image/jpeg": ".jpg",
     "image/jpg": ".jpg",
@@ -225,7 +233,6 @@ class InferenceReason:
     RULE_4_BOT_REPLIED: Final[str] = "rule_4_bot_replied" # Bot 刚回复过此人
     RULE_4B_BOT_INTERRUPTED: Final[str] = "rule_4b_bot_interrupted" # Bot 插话导致误判，回退给上一位对话者
     RULE_5_ABA_PATTERN: Final[str] = "rule_5_aba_pattern" # A-B-A 对话模式
-    RULE_6_QUICK_FOLLOW: Final[str] = "rule_6_quick_follow"  # 快速连续对话
     DEFAULT_GROUP: Final[str] = "default_group"           # 默认群聊
 
 
@@ -1261,15 +1268,17 @@ class SceneAnalyzer:
         )
 
         for comp in event.get_messages():
-            if isinstance(comp, At):
+            if isinstance(comp, AtAll):
+                msg.at_all = True
+            elif isinstance(comp, At):
                 qq_str = str(comp.qq)
                 msg.at_targets.append(
                     _normalize_at_target(self._bot_id, qq_str, comp.name or qq_str)
                 )
                 if qq_str == self._bot_id:
                     msg.at_bot = True
-            elif isinstance(comp, AtAll):
-                msg.at_all = True
+                elif qq_str == "all":
+                    msg.at_all = True
             elif isinstance(comp, Reply):
                 _apply_reply_reference(msg, comp)
 
@@ -1444,12 +1453,12 @@ class SceneAnalyzer:
 
         # ===== 规则4: Bot 刚回复过当前用户，且用户像在回应（中置信度）=====
         # 关键修复：必须是 Bot 之前在回复"当前这个用户"，才能推断用户在回复 Bot
-        if last.is_bot and time_gap < 35:
+        if last.is_bot and time_gap < 20:
             # 检查 Bot 上次是否在回复当前发言者
             if bot_replied_to == msg.sender_id:
                 stripped = msg.content.strip()
                 # 保守：只对“短确认/致谢类”做推断，避免把用户对他人的“好的/嗯”等当成回复 Bot
-                if stripped and len(stripped) <= 30 and (
+                if stripped and len(stripped) <= 20 and (
                     self._looks_like_reply(stripped)
                     or self._looks_like_direct_bot_followup(stripped)
                 ):
@@ -1486,14 +1495,6 @@ class SceneAnalyzer:
                 msg.talking_to, msg.talking_to_name = last.sender_id, last.sender_name
                 return InferenceReason.RULE_5_ABA_PATTERN
 
-        # ===== 规则6: 快速连续对话（最低置信度，收紧条件）=====
-        # 只有非常短的时间间隔 + 非 Bot 消息 + 上一条是对群说的，才推断是延续对话
-        if time_gap < 15 and not last.is_bot:
-            # 如果上一条是某人对群说的，当前消息可能是在回应那个人
-            if last.talking_to == "group":
-                msg.talking_to, msg.talking_to_name = last.sender_id, last.sender_name
-                return InferenceReason.RULE_6_QUICK_FOLLOW
-        
         # 默认：保持 talking_to = "group"，表示无法确定具体对话对象
         return InferenceReason.DEFAULT_GROUP
 
@@ -1976,8 +1977,9 @@ class Main(star.Star):
 
         # v3.0.0: 图像转述并发控制
         self._image_caption_semaphore = asyncio.Semaphore(3)  # 最多并发3个
-        self._image_caption_cache: OrderedDict[str, str] = OrderedDict()  # 图片引用 -> caption/失败哨兵 (LRU)
+        self._image_caption_cache: OrderedDict[str, tuple[str, float]] = OrderedDict()  # 图片引用 -> (caption/失败哨兵, 写入时间) (LRU)
         self._image_caption_cache_max = 100  # 硬上限
+        self._image_caption_cache_ttl = IMAGE_CAPTION_CACHE_TTL_SECONDS
         # 用户可配置超时（范围校验：10-600秒，与 schema 对齐）
         _timeout_cfg = self._cfg_int("image_caption_timeout", 60)
         if _timeout_cfg < 10 or _timeout_cfg > 600:
@@ -2007,7 +2009,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.3.0"
+        version = "3.5.0"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -2715,6 +2717,9 @@ class Main(star.Star):
                 )
 
                 return await self._sessions.get_snapshot_async(umo)
+        except asyncio.CancelledError:
+            await self._sessions.clear_compressing_async(umo)
+            raise
         except Exception as e:
             logger.error(f"[ContextAware] 历史压缩失败: {e}")
             await self._sessions.clear_compressing_async(umo)
@@ -2731,13 +2736,16 @@ class Main(star.Star):
     def _get_cached_image_caption(self, cache_key: str) -> tuple[bool, str | None]:
         if cache_key not in self._image_caption_cache:
             return False, None
+        cached, cached_at = self._image_caption_cache[cache_key]
+        if time.time() - cached_at >= self._image_caption_cache_ttl:
+            del self._image_caption_cache[cache_key]
+            return False, None
         self._image_caption_cache_hits += 1
         self._image_caption_cache.move_to_end(cache_key)
-        cached = self._image_caption_cache[cache_key]
         return True, cached or None
 
     def _cache_image_caption(self, cache_key: str, caption: str) -> None:
-        self._image_caption_cache[cache_key] = caption
+        self._image_caption_cache[cache_key] = (caption, time.time())
         self._image_caption_cache.move_to_end(cache_key)
         while len(self._image_caption_cache) > self._image_caption_cache_max:
             self._image_caption_cache.popitem(last=False)
@@ -2874,6 +2882,8 @@ class Main(star.Star):
                 self._mark_image_caption_failed(cache_key)
                 return None
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             self._image_caption_errors += 1
             self._mark_image_caption_failed(cache_key)
@@ -2958,15 +2968,17 @@ class Main(star.Star):
 
         # 提取 @ 和回复信息
         for comp in event.get_messages():
-            if isinstance(comp, At):
+            if isinstance(comp, AtAll):
+                msg.at_all = True
+            elif isinstance(comp, At):
                 qq_str = str(comp.qq)
                 msg.at_targets.append(
                     _normalize_at_target(self._analyzer.bot_id, qq_str, comp.name or qq_str)
                 )
                 if qq_str == self._analyzer.bot_id:
                     msg.at_bot = True
-            elif isinstance(comp, AtAll):
-                msg.at_all = True
+                elif qq_str == "all":
+                    msg.at_all = True
             elif isinstance(comp, Reply):
                 _apply_reply_reference(msg, comp)
 
@@ -3241,6 +3253,8 @@ class Main(star.Star):
                 f"历史: {len(flow)} 条"
             )
 
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[ContextAware] 场景分析失败: {e}")
 
@@ -3320,6 +3334,8 @@ class Main(star.Star):
             if clean_marker or reset_command:
                 reason = clean_marker or f"/{reset_command} 命令"
                 await self._clear_session_context(event, reason)
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[ContextAware] 清理会话失败: {e}")
 
@@ -3440,6 +3456,16 @@ class Main(star.Star):
         """
         return self._sessions.has_session(unified_msg_origin)
 
+    async def remove_message_async(self, unified_msg_origin: str, msg_id: str) -> bool:
+        """删除指定会话中的指定消息（异步，推荐使用）
+
+        供 recall_cancel 等插件在异步上下文中调用，避免并发撤回时绕过会话锁。
+        """
+        result = await self._sessions.remove_message_by_id_async(unified_msg_origin, msg_id)
+        if result:
+            logger.debug(f"[ContextAware] 已删除消息记录 msg_id={msg_id}")
+        return result
+
     def remove_message(self, unified_msg_origin: str, msg_id: str) -> bool:
         """删除指定会话中的指定消息
         
@@ -3455,6 +3481,16 @@ class Main(star.Star):
         result = self._sessions.remove_message_by_id(unified_msg_origin, msg_id)
         if result:
             logger.debug(f"[ContextAware] 已删除消息记录 msg_id={msg_id}")
+        return result
+
+    async def remove_last_bot_response_async(self, unified_msg_origin: str) -> bool:
+        """删除指定会话中最后一条 Bot 回复（异步，推荐使用）
+
+        供 recall_cancel 等插件在异步上下文中调用，避免并发撤回时绕过会话锁。
+        """
+        result = await self._sessions.remove_last_bot_message_async(unified_msg_origin)
+        if result:
+            logger.debug("[ContextAware] 已删除最后一条 Bot 回复记录")
         return result
 
     def remove_last_bot_response(self, unified_msg_origin: str) -> bool:

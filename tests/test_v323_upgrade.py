@@ -182,6 +182,7 @@ def _make_caption_plugin(provider: CaptionProvider):
     instance._image_caption_cache = OrderedDict()
     instance._image_caption_cache_hits = 0
     instance._image_caption_cache_max = 100
+    instance._image_caption_cache_ttl = 3600.0
     instance._image_caption_count = 0
     instance._image_caption_enabled = True
     instance._image_caption_errors = 0
@@ -325,7 +326,7 @@ class ImageCaptionDataUriTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second)
         self.assertEqual(provider.calls, 1)
         self.assertEqual(
-            instance._image_caption_cache[plugin.Main._image_caption_cache_key(data_uri)],
+            instance._image_caption_cache[plugin.Main._image_caption_cache_key(data_uri)][0],
             "",
         )
 
@@ -838,7 +839,7 @@ class InferenceSafetyTests(unittest.TestCase):
             sender_id="user",
             sender_name="用户",
             content="好的",
-            timestamp=80,
+            timestamp=65,
         )
 
         reason = analyzer.infer_addressee(

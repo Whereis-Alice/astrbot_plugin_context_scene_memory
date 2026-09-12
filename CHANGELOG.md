@@ -13,6 +13,24 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.5.0
+
+本版本筛选同步上游 `v3.4.1`、`v3.2.0` 中适合轻量群聊场景记忆定位的修复，不引入上游新增的重型图片缓存、按需看图、私聊 SQLite 记忆等功能。
+
+### 修复
+
+- `@全体成员` 组件现在优先于 `@` 组件解析，兼容 `AtAll` 继承 `At` 的平台实现；`At(qq="all")` 也会按 `@全体` 处理。
+- 新增 `remove_message_async()` 与 `remove_last_bot_response_async()` 公共 API，供撤回清理类插件在异步上下文中安全使用会话锁。
+- 图像转述、历史压缩、场景注入和会话清理会放通 `asyncio.CancelledError`，不再把任务取消误当成普通失败缓存或吞掉。
+- 图像转述缓存增加 1 小时 TTL；过期后重新请求，避免 CDN 图片链接失效后继续复用旧描述。
+- 修正加载日志中的版本号漂移，使其与元数据一致。
+
+### 推断优化
+
+- Bot 回复后的短确认/追问推断窗口从 35 秒收紧到 20 秒，短句长度上限同步收紧到 20 字符。
+- 保留“Bot 插话前他人正在和当前用户对话”的保护，优先归因给真实对话对象。
+- 移除规则 6“快速连续对话推断”，降低高频群聊中把对群发言误判为两人对话的概率。
+
 ## v3.4.1
 
 ### 修复

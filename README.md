@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.4.1`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.3.0`、`v3.3.1` 与 `v3.4.0` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.4.3`，本分叉没有直接引入其图片压缩和 GIF 首帧处理链路。
+当前分叉版为 `v3.5.0`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.2.0`、`v3.3.0`、`v3.3.1`、`v3.4.0` 与 `v3.4.1` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.7.1`，本分叉没有引入其图片压缩、按需看图、私聊 SQLite 话题记忆等重型链路。
 
 ## 这个插件做什么
 
@@ -167,8 +167,9 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - 上游 `v3.3.0`：图像转述失败哨兵缓存，以及可配置的严格触发模式。
 - 上游 `v3.3.1`：兼容平台直接传入的 base64 data URI 图片。分叉版改为使用短临时本地路径，而非重新传递 data URI，以适配 OpenAI、Gemini、Anthropic 等不同 Provider 的本地文件处理逻辑。
 - 上游 `v3.4.0`：吸收 `/reset`、`/new` 在记录前清空插件上下文，以及 `astrbot_plugin_cmdmask` 真实命令目标识别。
+- 上游 `v3.2.0` / `v3.4.1`：收紧 Bot 回复后的短确认推断窗口、移除快速连续对话推断、修正 `@全体` 识别、增加图像转述缓存 TTL、放通取消异常，并补充撤回清理异步 API。
 
-上游 `v3.4.0` 之后的图片压缩、远程图片下载缓存、引用文件归一化和 GIF 首帧处理没有直接引入。它们会改写请求中的图片组件并增加 Pillow、网络下载、磁盘缓存和生命周期管理复杂度；当前版本保留即时转述的简单行为，并只在遇到 data URI 时创建短生命周期临时文件。
+上游 `v3.4.0` 之后的图片压缩、远程图片下载缓存、引用文件归一化、GIF 首帧处理、按需看图、图片引用 API 和私聊 SQLite 话题记忆没有直接引入。它们会改写请求中的图片组件、增加 Pillow/aiohttp/SQLite 等依赖、引入磁盘或持久化生命周期管理；当前版本保留即时转述和内存场景记忆的简单行为，并只在遇到 data URI 时创建短生命周期临时文件。
 
 ## 公开 API
 
@@ -177,7 +178,9 @@ dynamic_name_identity_template = 消息里被点名的“{bot_called_names}”�
 - `get_recent_messages(unified_msg_origin, count=10)`
 - `get_formatted_context(unified_msg_origin, count=10)`
 - `has_session(unified_msg_origin)`
+- `remove_message_async(unified_msg_origin, msg_id)`
 - `remove_message(unified_msg_origin, msg_id)`
+- `remove_last_bot_response_async(unified_msg_origin)`
 - `remove_last_bot_response(unified_msg_origin)`
 
 `get_recent_messages()` 的每条记录还包含稳定的 `speaker_id`、兼顾可读性的 `speaker`、原始 `talking_to_id` 和带身份标签的 `talking_to_speaker`。原有的 `talking_to` 字段仍保留昵称化描述，便于旧调用方继续使用。
