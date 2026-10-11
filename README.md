@@ -4,7 +4,7 @@
 
 这是基于原仓库 [muyouzhi6/astrbot_plugin_context_aware](https://github.com/muyouzhi6/astrbot_plugin_context_aware) 的分叉维护版，当前仓库为 [Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)。
 
-当前分叉版为 `v3.5.0`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.2.0`、`v3.3.0`、`v3.3.1`、`v3.4.0` 与 `v3.4.1` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.7.1`，本分叉没有引入其图片压缩、按需看图、私聊 SQLite 话题记忆等重型链路。
+当前分叉版为 `v3.5.1`。它已同步上游 `v3.1.6` 的主要能力，并手工吸收了上游 `v3.2.0`、`v3.3.0`、`v3.3.1`、`v3.4.0` 与 `v3.4.1` 中适合本分叉的改进；同时保留插件标识、临时场景注入、动态群名片提示和 `astrbot_plugin_dynamic_card_plus` 适配。上游目前已更新到 `v3.10.0`，本分叉经逐版复核后仍有意不引入其图片压缩（Pillow 依赖）、按需看图工具、私聊 SQLite 话题记忆、GIF 多帧解码、视频理解与 Windows `file://` 媒体路径等重型链路；上游 `v3.10.0` 新增且默认关闭的 `show_sender_id` 已被本分叉默认启用、覆盖面更广的 `speaker_identity_mode` 取代，无需移植。
 
 ## 这个插件做什么
 

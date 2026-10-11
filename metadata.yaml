@@ -26,7 +26,7 @@ help: |
   - 同步上游低风险修复：@全体识别、撤回异步清理、图像转述缓存过期与取消异常传播
 
   更详细的来源说明、配置说明和变更记录请查看 README.md 与 CHANGELOG.md。
-version: 3.5.0
+version: 3.5.1
 author: Huli3（fork 自 木有知）
 repo: https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory
 astrbot_version: ">=4.24.0"

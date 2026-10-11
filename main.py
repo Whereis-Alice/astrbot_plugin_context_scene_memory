@@ -1,5 +1,5 @@
 """
-AstrBot 上下文场景记忆增强插件 v3.5.0 (Context Scene Memory)
+AstrBot 上下文场景记忆增强插件 v3.5.1 (Context Scene Memory)
 
 为 LLM 提供结构化的群聊场景描述，增强其对对话情境的理解能力。
 重点解决：主动回复时 Bot 误以为别人在问自己的问题。
@@ -15,6 +15,11 @@ AstrBot 上下文场景记忆增强插件 v3.5.0 (Context Scene Memory)
 - 只做加法，不修改框架原有信息
 - 可完全替代框架内置 LTM 的群聊记录功能
 - 轻量高效，图像转述为可选功能
+
+v3.5.1 分叉版更新:
+- [SYNC] 复核上游至 v3.10.0：图片压缩/Pillow、按需看图工具、私聊 SQLite 话题记忆、GIF 多帧解码、视频理解与 Windows file:// 媒体路径均为重型链路，按本分叉轻量定位有意不引入
+- [NOTE] 上游新增且默认关闭的 show_sender_id 已被本分叉默认启用、更强的 speaker_identity_mode 覆盖，无需移植
+- [CLEAN] 清理 lint：移除无占位符的 f-string，并对 SessionManager、SceneAnalyzer 的 __slots__ 做自然排序，行为不变
 
 v3.4.1 分叉版更新:
 - [FIX] 只有 AstrBot Image 组件才会进入最近图片上下文；纯文本中的 [图片] 不再被误认成真实图片
@@ -104,7 +109,7 @@ v2.5.1 更新:
 - 戳一戳时正确显示戳一戳用户信息
 
 Author: Huli3（fork 自 木有知）
-Version: 3.5.0
+Version: 3.5.1
 """
 
 from __future__ import annotations
@@ -849,7 +854,7 @@ class SessionManager:
     - 所有写操作应使用 async 版本
     """
 
-    __slots__ = ("_sessions", "_locks", "_max_messages", "_max_sessions", "_cache_lock")
+    __slots__ = ("_cache_lock", "_locks", "_max_messages", "_max_sessions", "_sessions")
 
     def __init__(self, max_messages: int = 50, max_sessions: int = 100) -> None:
         self._sessions: OrderedDict[str, SessionState] = OrderedDict()
@@ -1128,8 +1133,8 @@ class SceneAnalyzer:
 
     __slots__ = (
         "_bot_id",
-        "_bot_names",
         "_bot_name_patterns",
+        "_bot_names",
         "_reply_starters",
         "_wake_prefixes",
     )
@@ -2009,7 +2014,7 @@ class Main(star.Star):
         self._image_caption_errors = 0
         self._image_caption_cache_hits = 0
 
-        version = "3.5.0"
+        version = "3.5.1"
         caption_status = "已启用" if self._image_caption_enabled else "未启用"
         logger.info(f"[ContextAware] 插件 v{version} 已加载 | 图像转述: {caption_status}")
 
@@ -3111,7 +3116,7 @@ class Main(star.Star):
                     msg_id=f"poke_{uuid.uuid4().hex[:12]}",
                     sender_id=str(poke_sender_id),
                     sender_name=str(poke_sender_name),
-                    content=f"[戳了戳你]",
+                    content="[戳了戳你]",
                     timestamp=time.time(),
                     is_bot=False,
                     talking_to="bot",

@@ -13,6 +13,21 @@
 - 项目：`astrbot_plugin_context_scene_memory`
 - 仓库：[Whereis-Alice/astrbot_plugin_context_scene_memory](https://github.com/Whereis-Alice/astrbot_plugin_context_scene_memory)
 
+## v3.5.1
+
+本版本以维护为主：复核上游至 `v3.10.0`，确认本分叉已覆盖所有适合轻量群聊场景记忆定位的核心逻辑改进，不再引入上游新增的重型链路；并清理 lint 与同步文档。
+
+### 上游复核结论
+
+- 逐版复核上游 `v3.4.2` 至 `v3.10.0`，其新增均为重型功能：图片压缩（Pillow 依赖）、按需看图工具、私聊 SQLite 话题记忆、GIF 多帧解码、视频理解、Windows `file://` 媒体路径。按本分叉「轻量、零额外依赖」定位有意不引入。
+- 上游 `v3.10.0` 新增且默认关闭的 `show_sender_id`（显示为「昵称 (id)」）已被本分叉默认启用、覆盖面更广的 `speaker_identity_mode`（默认渲染「名字 [QQ 号]」）取代，无需移植。
+- 上游针对 `asyncio.TimeoutError`、data URI 图片、多图转述、`/reset`+`cmdmask` 清理等低风险修复，本分叉此前已同步或自有更强实现。
+
+### 清理
+
+- 移除一处无占位符的 f-string；对 `SessionManager`、`SceneAnalyzer` 的 `__slots__` 做自然排序。均为行为无关的 lint 收尾。
+- 同步版本号与文档中的上游版本标注（`v3.7.1` → `v3.10.0`）。
+
 ## v3.5.0
 
 本版本筛选同步上游 `v3.4.1`、`v3.2.0` 中适合轻量群聊场景记忆定位的修复，不引入上游新增的重型图片缓存、按需看图、私聊 SQLite 记忆等功能。
